@@ -483,20 +483,66 @@ def _post_to_arc_ingest_with_retry(
         # as-is; no need to catch + rewrap.
 
 
-def _download_signed_bytes(signed_file_url: str) -> bytes:
-    """Download the credentialed file from the short-lived signed URL
-    returned by arcIngest. The URL has a 15-minute TTL on the server
-    side; we use it immediately."""
+def _download_credentialed_bytes(ingest_result: dict) -> bytes:
+    """Download the credentialed file with verify-route fallback.
+
+    Two-tier download:
+      Tier 1 — signedFileUrl: pre-signed Storage URL, 15-min TTL,
+        no rate limit. Fastest path. The server's contract
+        explicitly allows it to be '' when getSignedUrl mints
+        fail (e.g. the runtime SA lacks
+        iam.serviceAccounts.signBlob — see arcIngest.ts
+        ingest.signed_url_failed WARN path).
+      Tier 2 — {verifyUrl}&format=file: ARC-API-2 Commit 5 vault
+        verify route, public, rate-limited at 60/min per item
+        via assertFlatRateLimit. Durable — uses Admin SDK to
+        serve the binary; does NOT depend on URL-signing IAM,
+        so it works even if Tier 1 is permanently broken.
+
+    The signed URL is now an OPTIMIZATION. The verify route is
+    the durable source of truth. This function fails loudly only
+    if BOTH paths fail; the resulting error message includes
+    each tier's failure cause.
+    """
+    signed_file_url = ingest_result.get("signedFileUrl") or ""
+    verify_url = ingest_result.get("verifyUrl") or ""
+
+    primary_err: str = ""
+    if signed_file_url:
+        try:
+            resp = requests.get(signed_file_url, timeout=DOWNLOAD_TIMEOUT_SECONDS)
+            if resp.status_code == 200:
+                return resp.content
+            primary_err = f"HTTP {resp.status_code}"
+        except requests.RequestException as e:
+            primary_err = f"{type(e).__name__}: {e}"
+    else:
+        primary_err = (
+            "empty (server URL-minting failed; see ingest.signed_url_failed)"
+        )
+
+    if not verify_url:
+        raise RuntimeError(
+            "ArcVelvet credentialed-bytes download failed — "
+            f"signedFileUrl: {primary_err}; verifyUrl was also empty."
+        )
+
+    fallback_url = (
+        verify_url + ("&" if "?" in verify_url else "?") + "format=file"
+    )
     try:
-        resp = requests.get(signed_file_url, timeout=DOWNLOAD_TIMEOUT_SECONDS)
+        resp = requests.get(fallback_url, timeout=DOWNLOAD_TIMEOUT_SECONDS)
     except requests.RequestException as e:
         raise RuntimeError(
-            f"ArcVelvet signed-file download transport error: "
-            f"{type(e).__name__}: {e}"
+            "ArcVelvet credentialed-bytes download failed — "
+            f"signedFileUrl: {primary_err}; "
+            f"verify-route fallback transport: {type(e).__name__}: {e}"
         )
     if resp.status_code != 200:
         raise RuntimeError(
-            f"ArcVelvet signed-file download failed: HTTP {resp.status_code}"
+            "ArcVelvet credentialed-bytes download failed — "
+            f"signedFileUrl: {primary_err}; "
+            f"verify-route fallback: HTTP {resp.status_code}"
         )
     return resp.content
 
@@ -716,7 +762,7 @@ class ARCSave:
                 api_key=api_key,
             )
 
-            signed_bytes = _download_signed_bytes(ingest_result["signedFileUrl"])
+            signed_bytes = _download_credentialed_bytes(ingest_result)
 
             filename = _write_outputs(
                 signed_bytes=signed_bytes,

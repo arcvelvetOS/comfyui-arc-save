@@ -226,10 +226,43 @@ def main() -> int:
         return 1
     _log("batch", f"two distinct vaultItemIds: {[bi[:24]+'...' for bi in batch_ids]}")
 
+    # ── Fallback pass: empty signedFileUrl → verify-route format=file ──
+    # Server's contract explicitly allows signedFileUrl='' when
+    # getSignedUrl mints fail (see SMOKE-1: missing
+    # iam.serviceAccounts.signBlob on the runtime SA). The node's
+    # _download_credentialed_bytes must fall back to the public
+    # rate-limited verify route's ?format=file path. We exercise
+    # that here using the already-signed single-image vault item.
+    from nodes.arc_save import _download_credentialed_bytes  # noqa: E402
+
+    synthetic_receipt = {
+        "signedFileUrl": "",  # simulate the URL-minting-failed path
+        "verifyUrl": sidecar["verifyUrl"],
+    }
+    _log("fallback", "exercising empty-signedFileUrl → verify-route fallback")
+    try:
+        fallback_bytes = _download_credentialed_bytes(synthetic_receipt)
+    except Exception as e:
+        _log("FAIL", f"fallback path raised: {type(e).__name__}: {e}")
+        return 1
+    if len(fallback_bytes) < 1024:
+        _log("FAIL", f"fallback bytes suspiciously small: {len(fallback_bytes)}")
+        return 1
+    if fallback_bytes[:8] != b"\x89PNG\r\n\x1a\n":
+        _log(
+            "FAIL",
+            f"fallback bytes missing PNG magic header: {fallback_bytes[:8]!r}",
+        )
+        return 1
+    _log(
+        "fallback",
+        f"verify-route fallback returned {len(fallback_bytes)} bytes, PNG header OK",
+    )
+
     # ── Cleanup on PASS ──────────────────────────────────────────
     shutil.rmtree(output_dir, ignore_errors=True)
     shutil.rmtree(batch_dir, ignore_errors=True)
-    _log("PASS", "Smoke test green (single + batch). Cleanup complete.")
+    _log("PASS", "Smoke test green (single + batch + fallback). Cleanup complete.")
     print("", flush=True)
     print(
         "Note: subsequent smoke runs with seeds 42/43 will hit the dedup\n"
