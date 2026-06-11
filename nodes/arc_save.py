@@ -7,21 +7,26 @@ live ArcVelvet arcIngest endpoint, downloads the signed copy, writes
 the signed PNG plus a sidecar .arc.json receipt to the output
 directory.
 
-Day 1 scope (this commit):
-    - Single-image only (images[0]; multi-image batches error loudly)
-    - No retry (fail loudly on any non-200 or transport error)
+Current scope (Day 1 + the next reviewable piece — batch + retry):
+    - Per-image loop: every image in the IMAGE batch tensor gets its
+      own encode → POST → download → write cycle. The ui.images
+      return array carries one entry per saved file so ComfyUI's
+      preview tile renders the full batch.
+    - Single retry with 2-second backoff on TRANSIENT errors only
+      (HTTP 503 + requests.Timeout + requests.ConnectionError).
+      Every other non-200 (401/403/413/415/429/500/etc.) raises
+      immediately — no retry for terminal failures. Second-attempt
+      failure surfaces the prior-attempt cause in the message.
     - No prompt redaction — prompt graph sent VERBATIM in the
       generation assertion. The redaction-pass widget intentionally
-      does NOT ship in Day 1 INPUT_TYPES: a visible toggle that
-      gates nothing is worse than no toggle. The widget returns
-      with the redaction piece (Day 2) when it actually controls
-      behavior.
+      does NOT ship yet: a visible toggle that gates nothing is
+      worse than no toggle. The widget returns with the redaction
+      piece when it actually controls behavior.
     - arc_config.json + ARC_API_KEY env var key loading
     - Sidecar .arc.json with vaultItemId / verifyUrl / contentHash
 
-Out of Day 1 scope (later pieces):
-    - Batch handling + retry on 503/network (next reviewable piece)
-    - Prompt redaction + the include_prompt_text widget (after that)
+Out of current scope (later pieces):
+    - Prompt redaction + the include_prompt_text widget
     - Manager / Registry packaging
 
 Additive-fingerprint slot (ARC-API-3-0 addendum):
@@ -38,6 +43,7 @@ import base64
 import io
 import json
 import os
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -53,10 +59,15 @@ INGEST_URL = "https://us-central1-arcvelvetos.cloudfunctions.net/arcIngest"
 
 # Request timeouts (seconds). The benchmark from ARC-API-1 put sign
 # latency at <1s warm even for 20 MB inputs; the 60s ceiling here
-# absorbs cold start + upload time + headroom. Day 1 has no retry;
-# the request either completes within this window or fails loudly.
+# absorbs cold start + upload time + headroom.
 INGEST_TIMEOUT_SECONDS = 60
 DOWNLOAD_TIMEOUT_SECONDS = 60
+
+# Retry posture for transient ingest failures. Operator-locked:
+# single retry on 503 / Timeout / ConnectionError, 2-second backoff
+# between attempts. Any other status code (auth, rate-limit, payload-
+# too-large, sign-failed) is terminal — no retry.
+RETRY_BACKOFF_SECONDS = 2.0
 
 # Compression level for PIL Image.save (matches SaveImage's
 # compress_level=4 default for output files; PreviewImage uses 1).
@@ -140,16 +151,24 @@ def _build_generation_assertion(
     unique_id: Any,
     title: str,
     comfyui_version: str,
+    batch_index: int,
+    batch_size: int,
 ) -> dict:
     """Build the data block sent as X-Arc-Generation-Metadata.
 
-    Day 1 scope: sends prompt VERBATIM. The redaction pass (Day 2)
-    will add an inline transform on workflow_prompt and a
+    Sends prompt VERBATIM. The redaction pass (later piece) will
+    add an inline transform on workflow_prompt and a
     `redacted_prompt: bool` field to the returned dict so relying
     parties can tell whether text fields are hashed or plaintext.
-    Day 1 leaves both off — the absence of the field signals
+    Until then both are absent — the absence of the field signals
     "verbatim" unambiguously, and the field arrives meaningful
     rather than as a misleading constant False.
+
+    batch_index and batch_size are baked into every per-image
+    assertion so a relying party can see "this is image 2 of 4
+    from the same workflow execution." Useful for video frame
+    chains, multi-sample ablations, and any downstream tooling
+    that wants to reconstruct the batch grouping after the fact.
 
     The returned dict is open-shaped — additional top-level keys
     (e.g. a future perceptual fingerprint block) can be added by
@@ -161,6 +180,8 @@ def _build_generation_assertion(
         "comfyui_version": comfyui_version,
         "node_id": str(unique_id) if unique_id is not None else "unknown",
         "title": title,
+        "batch_index": batch_index,
+        "batch_size": batch_size,
         "workflow_prompt": prompt or {},
         # extra_pnginfo typically has a "workflow" key holding the
         # editor UI graph (positions, widget values, group annotations).
@@ -169,12 +190,20 @@ def _build_generation_assertion(
         # Reserved slot for future per-image perceptual fingerprint.
         # ARC-API-3-0 addendum: confirmed the assertion path can carry
         # one more optional namespaced block without core-flow change.
-        # Day 1 leaves it absent; future code adds it here as
+        # Current build leaves it absent; future code adds it here as
         # "fingerprint": { "algorithm": "...", "value": "..." }.
     }
 
 
 # ─── HTTP ──────────────────────────────────────────────────────────
+
+
+class _TransientIngestError(Exception):
+    """Internal sentinel — POST failed in a way that's worth one retry
+    (HTTP 503 from the server, or a Timeout / ConnectionError on the
+    transport). NEVER surfaced to the caller as-is; the retry wrapper
+    either succeeds on the second attempt or wraps this in a final
+    RuntimeError that includes the prior-attempt cause."""
 
 
 def _post_to_arc_ingest(
@@ -183,18 +212,23 @@ def _post_to_arc_ingest(
     generation_assertion: dict,
     api_key: str,
 ) -> dict:
-    """POST the PNG bytes + generation assertion to arcIngest.
+    """Single POST attempt to arcIngest.
 
-    Day 1: fail loudly on any non-200 or transport error. No retry.
-    Retry-on-transient lands in the next reviewable piece.
+    Three exits:
+      - 200 → returns the parsed receipt dict.
+      - 503 / requests.Timeout / requests.ConnectionError →
+        raises _TransientIngestError (the retry wrapper handles).
+      - Anything else (auth, rate-limit, payload-too-large,
+        sign-failed, other transport classes, 200 with non-JSON
+        body, etc.) → raises RuntimeError immediately. Terminal,
+        no retry — these reflect creator action items (revoke +
+        reissue a key, back off rate, shrink payload) or server
+        bugs that won't fix themselves in 2 seconds.
 
     The X-Arc-Title header is URL-encoded so non-ASCII titles ride
     through without HTTP header byte-set violations. The server
-    URL-decodes on receipt.
-
-    The X-Arc-Generation-Metadata header is base64-encoded JSON.
-    The server validates ≤ 64 KB decoded; we trust the caller to
-    not blow that budget (the workflow graph is typically a few KB).
+    URL-decodes on receipt. X-Arc-Generation-Metadata is base64-
+    encoded JSON; the server validates ≤ 64 KB decoded.
     """
     encoded_title = quote(title or "", safe="")
     encoded_metadata = base64.b64encode(
@@ -215,9 +249,15 @@ def _post_to_arc_ingest(
             data=png_bytes,
             timeout=INGEST_TIMEOUT_SECONDS,
         )
+    except (requests.Timeout, requests.ConnectionError) as e:
+        raise _TransientIngestError(
+            f"transport {type(e).__name__}: {e}"
+        )
     except requests.RequestException as e:
+        # Non-retryable transport class (e.g. InvalidURL, MissingSchema).
         raise RuntimeError(
-            f"ArcVelvet ingest transport error: {type(e).__name__}: {e}"
+            f"ArcVelvet ingest transport error (terminal): "
+            f"{type(e).__name__}: {e}"
         )
 
     if resp.status_code == 200:
@@ -228,13 +268,49 @@ def _post_to_arc_ingest(
                 f"ArcVelvet ingest returned 200 but body was not JSON: {e}"
             )
 
-    # Non-200 — fail loudly. Surface the server's stable error code
-    # (ERR_AUTH_FAILED, ERR_RATE_LIMITED, ...) in the message so the
-    # creator can act without digging through logs.
+    if resp.status_code == 503:
+        raise _TransientIngestError(
+            f"server unavailable: HTTP 503 {resp.text[:200]}"
+        )
+
+    # Any other non-200 — terminal. Surface the server's stable error
+    # code (ERR_AUTH_FAILED, ERR_RATE_LIMITED, ERR_PAYLOAD_TOO_LARGE,
+    # ERR_SIGN_FAILED, etc.) so the creator can act without digging.
     body_preview = resp.text[:400]
     raise RuntimeError(
         f"ArcVelvet ingest failed: HTTP {resp.status_code} — {body_preview}"
     )
+
+
+def _post_to_arc_ingest_with_retry(
+    png_bytes: bytes,
+    title: str,
+    generation_assertion: dict,
+    api_key: str,
+) -> dict:
+    """Wraps _post_to_arc_ingest with a single 2-second retry on
+    transient failure (HTTP 503, Timeout, ConnectionError).
+
+    Terminal failures raise immediately on the first attempt — no
+    retry. A second-attempt transient failure surfaces as a
+    RuntimeError that includes both attempts' causes so the creator
+    sees the full picture in ComfyUI's error tile.
+    """
+    try:
+        return _post_to_arc_ingest(png_bytes, title, generation_assertion, api_key)
+    except _TransientIngestError as first_err:
+        time.sleep(RETRY_BACKOFF_SECONDS)
+        try:
+            return _post_to_arc_ingest(
+                png_bytes, title, generation_assertion, api_key
+            )
+        except _TransientIngestError as second_err:
+            raise RuntimeError(
+                f"ArcVelvet ingest failed after 1 retry — "
+                f"first: {first_err}; second: {second_err}"
+            )
+        # A terminal RuntimeError on the second attempt propagates
+        # as-is; no need to catch + rewrap.
 
 
 def _download_signed_bytes(signed_file_url: str) -> bytes:
@@ -396,60 +472,66 @@ class ARCSave:
         # _resolve_output_dir docstring.
         _output_dir_override: str | None = None,
     ):
-        # Day 1: single-image only. Multi-image batches error loudly
-        # so the creator doesn't silently lose images in the next-
-        # piece-not-yet-built window.
         if not hasattr(images, "__len__") or len(images) == 0:
             raise RuntimeError("ARC Save: no images received from upstream node.")
-        if len(images) > 1:
-            raise RuntimeError(
-                f"ARC Save Day 1: received {len(images)} images but batch "
-                "handling is not implemented yet. Use a single-image "
-                "workflow or wait for the next reviewable piece."
-            )
 
         api_key = _load_api_key()
         output_dir = _resolve_output_dir(_output_dir_override)
         comfyui_version = _detect_comfyui_version()
+        batch_size = len(images)
 
-        image_tensor = images[0]
-        png_bytes = _encode_image_to_png_bytes(image_tensor)
+        # Per-image loop. Each image's sign is INDEPENDENT — a failure
+        # on image 3 raises immediately and the workflow halts; images
+        # 1 and 2 are already saved (the API's content-hash idempotency
+        # means re-running the workflow won't double-charge those two).
+        # Fail-loud posture applies per-image: any non-retryable error
+        # on any image stops the batch.
+        #
+        # Rate-limit note: arcIngest is 10/min per API key. A batch of
+        # 11+ images will trigger ERR_RATE_LIMITED partway through and
+        # raise loudly with the exact failure point. The creator
+        # decides whether to wait + re-run (idempotent dedup on the
+        # already-saved images) or to split the workflow.
+        saved_filenames: list[str] = []
+        for batch_index, image_tensor in enumerate(images):
+            png_bytes = _encode_image_to_png_bytes(image_tensor)
 
-        generation_assertion = _build_generation_assertion(
-            prompt=prompt,
-            extra_pnginfo=extra_pnginfo,
-            unique_id=unique_id,
-            title=title,
-            comfyui_version=comfyui_version,
-        )
+            generation_assertion = _build_generation_assertion(
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
+                unique_id=unique_id,
+                title=title,
+                comfyui_version=comfyui_version,
+                batch_index=batch_index,
+                batch_size=batch_size,
+            )
 
-        ingest_result = _post_to_arc_ingest(
-            png_bytes=png_bytes,
-            title=title,
-            generation_assertion=generation_assertion,
-            api_key=api_key,
-        )
+            ingest_result = _post_to_arc_ingest_with_retry(
+                png_bytes=png_bytes,
+                title=title,
+                generation_assertion=generation_assertion,
+                api_key=api_key,
+            )
 
-        signed_bytes = _download_signed_bytes(ingest_result["signedFileUrl"])
+            signed_bytes = _download_signed_bytes(ingest_result["signedFileUrl"])
 
-        filename = _write_outputs(
-            signed_bytes=signed_bytes,
-            ingest_result=ingest_result,
-            output_dir=output_dir,
-            filename_prefix=filename_prefix,
-        )
+            filename = _write_outputs(
+                signed_bytes=signed_bytes,
+                ingest_result=ingest_result,
+                output_dir=output_dir,
+                filename_prefix=filename_prefix,
+            )
+            saved_filenames.append(filename)
 
         # OUTPUT_NODE ui-result shape — ComfyUI's editor uses this to
-        # render the saved image as the node's preview tile. Match
-        # SaveImage's return shape so the editor handles it natively.
+        # render saved images as the node's preview tile. One entry
+        # per image so the full batch shows. Matches SaveImage's
+        # batch return shape.
         return {
             "ui": {
                 "images": [
-                    {
-                        "filename": filename,
-                        "subfolder": "",
-                        "type": "output",
-                    }
+                    {"filename": f, "subfolder": "", "type": "output"}
+                    for f in saved_filenames
                 ]
             }
         }

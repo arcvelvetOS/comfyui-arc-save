@@ -172,12 +172,66 @@ def main() -> int:
     _log("assert", f"sidecar contentHash: {sidecar['contentHash'][:16]}...")
     _log("assert", f"sidecar deduplicated: {sidecar.get('deduplicated')}")
 
+    # ── Batch pass: 2 distinct images, exercises per-image loop ──
+    batch_dir = tempfile.mkdtemp(prefix="arc_smoke_batch_")
+    _log("batch", f"output dir: {batch_dir}")
+
+    np.random.seed(43)
+    batch_images = [
+        FakeTensor(np.random.rand(64, 64, 3).astype(np.float32)),
+        FakeTensor(np.random.rand(64, 64, 3).astype(np.float32)),
+    ]
+    try:
+        batch_result = node.save(
+            images=batch_images,
+            filename_prefix="smoke_batch",
+            title="ARC-API-3-1 batch smoke",
+            prompt={"1": {"class_type": "BatchFake", "inputs": {}}},
+            extra_pnginfo={"workflow": {"nodes": []}},
+            unique_id="smoke_batch_node",
+            _output_dir_override=batch_dir,
+        )
+        _log("batch", f"save() returned {len(batch_result['ui']['images'])} entries")
+    except Exception as e:
+        _log("FAIL", f"batch save() raised {type(e).__name__}: {e}")
+        _log("artifacts", f"preserved at {batch_dir} for diagnosis")
+        return 1
+
+    batch_files = sorted(os.listdir(batch_dir))
+    batch_pngs = [f for f in batch_files if f.endswith(".png")]
+    batch_sidecars = [f for f in batch_files if f.endswith(".arc.json")]
+    if len(batch_pngs) != 2 or len(batch_sidecars) != 2:
+        _log(
+            "FAIL",
+            f"batch expected 2 PNG + 2 JSON, got {len(batch_pngs)} PNG / "
+            f"{len(batch_sidecars)} JSON: {batch_files}",
+        )
+        _log("artifacts", f"preserved at {batch_dir} for diagnosis")
+        return 1
+
+    # Confirm the two batch entries are DISTINCT (different
+    # vaultItemIds → different content hashes → per-image loop is
+    # actually running, not double-saving the same image).
+    batch_ids = []
+    for s in batch_sidecars:
+        with open(os.path.join(batch_dir, s), "r", encoding="utf-8") as f:
+            batch_ids.append(json.load(f).get("vaultItemId"))
+    if len(set(batch_ids)) != 2:
+        _log(
+            "FAIL",
+            f"batch produced duplicate vaultItemIds (per-image loop bug): {batch_ids}",
+        )
+        _log("artifacts", f"preserved at {batch_dir} for diagnosis")
+        return 1
+    _log("batch", f"two distinct vaultItemIds: {[bi[:24]+'...' for bi in batch_ids]}")
+
     # ── Cleanup on PASS ──────────────────────────────────────────
     shutil.rmtree(output_dir, ignore_errors=True)
-    _log("PASS", "Day 1 smoke test green. Cleanup complete.")
+    shutil.rmtree(batch_dir, ignore_errors=True)
+    _log("PASS", "Smoke test green (single + batch). Cleanup complete.")
     print("", flush=True)
     print(
-        "Note: subsequent smoke runs with seed=42 will hit the dedup\n"
+        "Note: subsequent smoke runs with seeds 42/43 will hit the dedup\n"
         "fast path on the server (same content_hash → same vaultItemId)\n"
         "and report deduplicated: true in the sidecar. That's expected\n"
         "behavior, not a test failure.",

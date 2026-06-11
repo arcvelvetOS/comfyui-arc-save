@@ -78,20 +78,23 @@ Sends a 64×64 random-noise PNG against the live `arcIngest`, asserts the receip
 
 Before any creator depends on this build, run a real workflow (SD1.5 KSampler → VAE Decode → ARC Save) end-to-end through a local ComfyUI install. Verify the signed PNG opens correctly in [Adobe Content Credentials inspector](https://contentauthenticity.adobe.com/inspect) and shows the ArcVelvet platform claim + `com.arcvelvet.generation` assertion. (The inspector will note an unknown CA until the SSL.com cert cutover; see "Cert status" below.)
 
-## What this V0 includes (Day 1 scope)
+## What this V0 includes
 
-- Single-image encode + POST + signed-bytes write
+- Per-image encode + POST + signed-bytes write across the full batch
+- Single 2-second retry on transient errors (HTTP 503, Timeout, ConnectionError); all other non-200s raise immediately
 - `arc_config.json` + `ARC_API_KEY` env var key loading
-- Fail-loudly on any non-200 from the API (no silent unsigned fallback)
-- Sidecar `.arc.json` with `vaultItemId` / `verifyUrl` / `contentHash`
-- Open-shape generation assertion (additive fingerprint slot reserved)
+- Fail-loudly on any terminal error (no silent unsigned fallback)
+- Sidecar `.arc.json` per signed image with `vaultItemId` / `verifyUrl` / `contentHash`
+- Open-shape generation assertion (batch_index/size baked in; additive fingerprint slot reserved)
 
 ## What's NOT yet in V0
 
-- Batch handling — multi-image batches **error loudly** rather than silently dropping images
-- Retry on transient (503 / network) errors
-- Prompt redaction — the prompt graph is currently sent VERBATIM in the assertion. The `include_prompt_text` widget intentionally does NOT ship in Day 1; it returns with the redaction pass.
+- Prompt redaction — the prompt graph is currently sent VERBATIM in the assertion. The `include_prompt_text` widget intentionally does NOT ship yet; it returns with the redaction pass when it actually controls behavior.
 - ComfyUI Manager / Comfy Registry packaging
+
+### Rate-limit note for batch workflows
+
+`arcIngest` allows 10 signings per minute per API key. A batch of 11+ images will trigger `ERR_RATE_LIMITED` partway through and the node will halt with the exact failure point named. Images already signed before the rate-limit hit are saved (and on rerun, the content-hash idempotency on the server will dedup them so you don't double-charge). For larger batches, either wait a minute and rerun the same workflow, or split the batch upstream.
 
 ## Cert status (read before sharing signed files publicly)
 
