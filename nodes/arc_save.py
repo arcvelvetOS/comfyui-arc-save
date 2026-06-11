@@ -61,7 +61,7 @@ import json
 import os
 import time
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import numpy as np
 import requests
@@ -72,6 +72,17 @@ from PIL import Image
 
 # Live arcIngest endpoint deployed under ARC-API-2 Commit 4.
 INGEST_URL = "https://us-central1-arcvelvetos.cloudfunctions.net/arcIngest"
+
+# Live c2paVerify MACHINE-API endpoint (Cloud Run direct URL). This
+# is the function URL from the ARC-API-2 Commit 5 deploy receipt —
+# NOT arcvelvet.com/verify (which is a Firebase Hosting rewrite to
+# public/verify.html, the human-facing SPA). The two URLs serve
+# distinct audiences:
+#   - arcvelvet.com/verify        → human page (SPA)
+#   - c2paverify-*.run.app        → machine API (this constant)
+# The node's fallback path MUST use the machine API; pointing at the
+# human page returns HTML, not the credentialed binary. See SMOKE-2.
+VERIFY_API_URL = "https://c2paverify-crvmppbxka-uc.a.run.app"
 
 # Request timeouts (seconds). The benchmark from ARC-API-1 put sign
 # latency at <1s warm even for 20 MB inputs; the 60s ceiling here
@@ -493,20 +504,36 @@ def _download_credentialed_bytes(ingest_result: dict) -> bytes:
         fail (e.g. the runtime SA lacks
         iam.serviceAccounts.signBlob — see arcIngest.ts
         ingest.signed_url_failed WARN path).
-      Tier 2 — {verifyUrl}&format=file: ARC-API-2 Commit 5 vault
-        verify route, public, rate-limited at 60/min per item
-        via assertFlatRateLimit. Durable — uses Admin SDK to
-        serve the binary; does NOT depend on URL-signing IAM,
-        so it works even if Tier 1 is permanently broken.
+      Tier 2 — machine-API verify route at VERIFY_API_URL with
+        ?type=vault&owner={uid}&item={itemId}&format=file. ARC-
+        API-2 Commit 5 vault route, public, rate-limited at
+        60/min per item via assertFlatRateLimit. Durable — uses
+        Admin SDK to serve the binary; does NOT depend on URL-
+        signing IAM, so it works even if Tier 1 is permanently
+        broken.
 
-    The signed URL is now an OPTIMIZATION. The verify route is
-    the durable source of truth. This function fails loudly only
-    if BOTH paths fail; the resulting error message includes
-    each tier's failure cause.
+    IMPORTANT — human page vs machine API:
+        The receipt's verifyUrl points at arcvelvet.com/verify,
+        which Firebase Hosting rewrites to public/verify.html
+        (the human-facing SPA). Fetching that URL returns HTML,
+        not the credentialed binary. The fallback MUST target
+        VERIFY_API_URL (the Cloud Run function URL) — the
+        machine API. See SMOKE-2 for the live failure that
+        forced this distinction.
+
+        We extract owner+item from the receipt's verifyUrl via
+        urllib.parse rather than reusing the URL itself, so the
+        node never fetches the human page expecting bytes.
+
+    The signed URL is an OPTIMIZATION. The verify-route machine
+    API is the durable source of truth. This function fails
+    loudly only if BOTH paths fail; the resulting error message
+    includes each tier's failure cause.
     """
     signed_file_url = ingest_result.get("signedFileUrl") or ""
-    verify_url = ingest_result.get("verifyUrl") or ""
+    receipt_verify_url = ingest_result.get("verifyUrl") or ""
 
+    # Tier 1 — try the pre-signed Storage URL when present.
     primary_err: str = ""
     if signed_file_url:
         try:
@@ -521,15 +548,37 @@ def _download_credentialed_bytes(ingest_result: dict) -> bytes:
             "empty (server URL-minting failed; see ingest.signed_url_failed)"
         )
 
-    if not verify_url:
+    # Tier 2 — extract owner + item from the receipt verifyUrl and
+    # rebuild against the machine-API endpoint. urllib.parse handles
+    # encoding edge cases properly; never string-split a URL.
+    if not receipt_verify_url:
         raise RuntimeError(
             "ArcVelvet credentialed-bytes download failed — "
             f"signedFileUrl: {primary_err}; verifyUrl was also empty."
         )
 
-    fallback_url = (
-        verify_url + ("&" if "?" in verify_url else "?") + "format=file"
+    parsed = urlparse(receipt_verify_url)
+    params = parse_qs(parsed.query)
+    owner_list = params.get("owner") or []
+    item_list = params.get("item") or []
+    if not owner_list or not item_list or not owner_list[0] or not item_list[0]:
+        raise RuntimeError(
+            "ArcVelvet credentialed-bytes download failed — "
+            f"signedFileUrl: {primary_err}; "
+            f"could not extract owner+item from verifyUrl "
+            f"(parsed query: {parsed.query!r})."
+        )
+
+    fallback_query = urlencode(
+        {
+            "type": "vault",
+            "owner": owner_list[0],
+            "item": item_list[0],
+            "format": "file",
+        }
     )
+    fallback_url = f"{VERIFY_API_URL}?{fallback_query}"
+
     try:
         resp = requests.get(fallback_url, timeout=DOWNLOAD_TIMEOUT_SECONDS)
     except requests.RequestException as e:
@@ -542,8 +591,24 @@ def _download_credentialed_bytes(ingest_result: dict) -> bytes:
         raise RuntimeError(
             "ArcVelvet credentialed-bytes download failed — "
             f"signedFileUrl: {primary_err}; "
-            f"verify-route fallback: HTTP {resp.status_code}"
+            f"verify-route fallback: HTTP {resp.status_code} "
+            f"(body preview: {resp.text[:200]!r})"
         )
+
+    # Content-Type guard: refuse non-image responses. If the verify-
+    # route ever serves HTML (route mismatch, error page, hostname
+    # collision with the human page), this catches it BEFORE the
+    # bytes get written to disk as a .png the creator can't open.
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+    if not content_type.startswith("image/"):
+        raise RuntimeError(
+            "ArcVelvet credentialed-bytes download failed — "
+            f"signedFileUrl: {primary_err}; "
+            f"verify-route fallback returned non-image Content-Type "
+            f"{content_type!r} (likely fetched a human page instead "
+            f"of the machine API). Body preview: {resp.text[:200]!r}"
+        )
+
     return resp.content
 
 

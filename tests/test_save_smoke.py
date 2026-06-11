@@ -226,25 +226,40 @@ def main() -> int:
         return 1
     _log("batch", f"two distinct vaultItemIds: {[bi[:24]+'...' for bi in batch_ids]}")
 
-    # ── Fallback pass: empty signedFileUrl → verify-route format=file ──
+    # ── Fallback pass: empty signedFileUrl → machine-API verify route ──
     # Server's contract explicitly allows signedFileUrl='' when
     # getSignedUrl mints fail (see SMOKE-1: missing
     # iam.serviceAccounts.signBlob on the runtime SA). The node's
-    # _download_credentialed_bytes must fall back to the public
-    # rate-limited verify route's ?format=file path. We exercise
-    # that here using the already-signed single-image vault item.
+    # _download_credentialed_bytes must fall back to the rate-
+    # limited machine-API verify route at VERIFY_API_URL. SMOKE-2
+    # forced the distinction: the receipt's verifyUrl is the HUMAN
+    # page (arcvelvet.com/verify → public/verify.html); the node
+    # MUST extract owner+item and rebuild against the function URL.
+    #
+    # This pass uses the already-signed single-image vault item's
+    # verifyUrl (the human URL) — exactly what an arcIngest response
+    # carries — so the urllib.parse extraction path is exercised.
     from nodes.arc_save import _download_credentialed_bytes  # noqa: E402
 
     synthetic_receipt = {
         "signedFileUrl": "",  # simulate the URL-minting-failed path
         "verifyUrl": sidecar["verifyUrl"],
     }
-    _log("fallback", "exercising empty-signedFileUrl → verify-route fallback")
+    _log("fallback", "exercising empty-signedFileUrl → machine-API fallback")
     try:
         fallback_bytes = _download_credentialed_bytes(synthetic_receipt)
     except Exception as e:
         _log("FAIL", f"fallback path raised: {type(e).__name__}: {e}")
         return 1
+
+    # Two-guard validation:
+    #   Guard 1 (Content-Type): _download_credentialed_bytes refuses
+    #     non-image responses internally and would raise above. If we
+    #     reach this point, the Content-Type was image/*.
+    #   Guard 2 (magic header): PNG signature bytes must lead. Catches
+    #     any image/* response that isn't actually a PNG (defense in
+    #     depth — if the verify route ever serves a different format,
+    #     this catches it before save-to-disk).
     if len(fallback_bytes) < 1024:
         _log("FAIL", f"fallback bytes suspiciously small: {len(fallback_bytes)}")
         return 1
@@ -256,7 +271,8 @@ def main() -> int:
         return 1
     _log(
         "fallback",
-        f"verify-route fallback returned {len(fallback_bytes)} bytes, PNG header OK",
+        f"machine-API fallback returned {len(fallback_bytes)} bytes, "
+        "Content-Type image/* (asserted in node), PNG header OK",
     )
 
     # ── Cleanup on PASS ──────────────────────────────────────────
