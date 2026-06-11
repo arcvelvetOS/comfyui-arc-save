@@ -7,27 +7,42 @@ live ArcVelvet arcIngest endpoint, downloads the signed copy, writes
 the signed PNG plus a sidecar .arc.json receipt to the output
 directory.
 
-Current scope (Day 1 + the next reviewable piece — batch + retry):
-    - Per-image loop: every image in the IMAGE batch tensor gets its
-      own encode → POST → download → write cycle. The ui.images
-      return array carries one entry per saved file so ComfyUI's
-      preview tile renders the full batch.
+Current scope (Day 1 + batch/retry + redaction):
+    - Per-image loop across the IMAGE batch tensor.
     - Single retry with 2-second backoff on TRANSIENT errors only
       (HTTP 503 + requests.Timeout + requests.ConnectionError).
       Every other non-200 (401/403/413/415/429/500/etc.) raises
-      immediately — no retry for terminal failures. Second-attempt
-      failure surfaces the prior-attempt cause in the message.
-    - No prompt redaction — prompt graph sent VERBATIM in the
-      generation assertion. The redaction-pass widget intentionally
-      does NOT ship yet: a visible toggle that gates nothing is
-      worse than no toggle. The widget returns with the redaction
-      piece when it actually controls behavior.
+      immediately — no retry for terminal failures.
+    - Prompt redaction (REDACTION PASS, this commit):
+        - include_prompt_text widget in INPUT_TYPES, default False
+          (redact). True bypasses redaction; prompt text passes
+          verbatim into the cryptographic assertion.
+        - When False: walk the PROMPT graph, find any node whose
+          class_type matches the configured pattern list, and
+          replace string values in known text-input field names
+          with SHA-256 hashes envelope-wrapped as
+              "[REDACTED:sha256:<64hex>]"
+          The workflow structure is preserved; only the text
+          payloads are hashed. A creator who later wants to prove
+          a specific prompt produced this image can reveal the
+          plaintext and any relying party hashes it to verify.
+        - Pattern list = LOCKED_CATCHALL_PATTERN ("textencode",
+          case-insensitive substring) PLUS the optional
+          text_encoder_patterns field in arc_config.json. The
+          catch-all is fail-closed — new/unknown CLIPTextEncode-
+          like variants redact rather than leak. Creators can
+          ADD patterns; they cannot REMOVE the catch-all.
+        - generation assertion gains a meaningful
+          redacted_prompt: bool field so relying parties can
+          tell whether text fields in workflow_prompt are
+          plaintext or hashes.
     - arc_config.json + ARC_API_KEY env var key loading
     - Sidecar .arc.json with vaultItemId / verifyUrl / contentHash
 
 Out of current scope (later pieces):
-    - Prompt redaction + the include_prompt_text widget
-    - Manager / Registry packaging
+    - Manager / Registry packaging (pyproject.toml for the
+      Comfy Registry + a PR against the ComfyUI Manager
+      custom-node-list.json)
 
 Additive-fingerprint slot (ARC-API-3-0 addendum):
     The generation assertion is built as an open dict. A future
@@ -40,6 +55,7 @@ Additive-fingerprint slot (ARC-API-3-0 addendum):
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -73,8 +89,60 @@ RETRY_BACKOFF_SECONDS = 2.0
 # compress_level=4 default for output files; PreviewImage uses 1).
 PNG_COMPRESS_LEVEL = 4
 
+# ── Redaction config ──────────────────────────────────────────────
+# LOCKED catch-all substring (case-insensitive). Cannot be removed
+# via arc_config.json — creators can only ADD patterns. Fail-closed
+# default: any class_type containing "textencode" gets redacted.
+LOCKED_CATCHALL_PATTERN = "textencode"
 
-# ─── API key loading ───────────────────────────────────────────────
+# Field names whose string values get hashed when the parent node
+# matches the encoder pattern list. Covers vanilla CLIPTextEncode
+# ("text"), CLIPTextEncodeSDXL ("text_g", "text_l"), and the common
+# positive/negative split used by many workflows. Lowercase for
+# case-insensitive matching against arbitrary case (e.g. "Text",
+# "PROMPT") in custom encoder shapes.
+DEFAULT_TEXT_INPUT_FIELDS_LOWER = (
+    "text",
+    "prompt",
+    "text_g",
+    "text_l",
+    "positive",
+    "negative",
+    "string",
+)
+
+# Envelope around each hash so a relying party reading the assertion
+# can identify the redaction unambiguously. The envelope IS structured
+# so anyone who later receives the plaintext can hash it and check
+# match without parsing tooling.
+_REDACTED_PREFIX = "[REDACTED:sha256:"
+_REDACTED_SUFFIX = "]"
+
+
+# ─── Config + API key loading ──────────────────────────────────────
+
+
+def _load_arc_config() -> dict:
+    """Read arc_config.json from the repo root if present. Returns
+    {} if absent. Raises RuntimeError on parse failure so a typo'd
+    config surfaces immediately rather than silently falling back
+    to defaults.
+
+    Read on every workflow execution — no caching. Config-edit
+    iterations land without ComfyUI restart at the cost of two
+    extra disk reads per execution (negligible).
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg_path = os.path.join(repo_root, "arc_config.json")
+    if not os.path.exists(cfg_path):
+        return {}
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        raise RuntimeError(
+            f"ArcVelvet: arc_config.json exists but failed to parse: {e}"
+        )
 
 
 def _load_api_key() -> str:
@@ -85,19 +153,10 @@ def _load_api_key() -> str:
     The key is read at execute time. It NEVER appears in INPUT_TYPES,
     so it cannot leak into the workflow JSON on share/export.
     """
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    cfg_path = os.path.join(repo_root, "arc_config.json")
-    if os.path.exists(cfg_path):
-        try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            key = cfg.get("api_key")
-            if isinstance(key, str) and key.startswith("arc_live_"):
-                return key
-        except (json.JSONDecodeError, OSError) as e:
-            raise RuntimeError(
-                f"ArcVelvet: arc_config.json exists but failed to parse: {e}"
-            )
+    cfg = _load_arc_config()
+    key = cfg.get("api_key")
+    if isinstance(key, str) and key.startswith("arc_live_"):
+        return key
     env_key = os.environ.get("ARC_API_KEY")
     if env_key and env_key.startswith("arc_live_"):
         return env_key
@@ -107,6 +166,113 @@ def _load_api_key() -> str:
         "root, OR set the ARC_API_KEY env var. "
         "See README.md for the issuance flow."
     )
+
+
+# ─── Redaction ─────────────────────────────────────────────────────
+
+
+def _load_text_encoder_patterns() -> tuple[str, ...]:
+    """Return the active text-encoder pattern list.
+
+    Composition:
+      LOCKED_CATCHALL_PATTERN (always included; cannot be removed)
+      + optional creator-supplied patterns from arc_config.json's
+        text_encoder_patterns array
+
+    Each pattern is a case-insensitive SUBSTRING checked against
+    each node's class_type. A node's class_type matches the
+    pattern list if ANY pattern is a substring of the lower-cased
+    class_type.
+
+    Invalid arc_config.json entries (non-string, empty string) are
+    silently skipped; a typo'd patterns list does NOT prevent
+    redaction — the catch-all still fires.
+    """
+    custom: list[str] = []
+    try:
+        cfg = _load_arc_config()
+    except RuntimeError:
+        # _load_arc_config raises on malformed JSON. If we got here
+        # via the save() path, _load_api_key has already raised the
+        # same error first — the workflow halted. If we got here via
+        # the unit-test path, defaults-only is the right fallback.
+        return (LOCKED_CATCHALL_PATTERN,)
+    raw = cfg.get("text_encoder_patterns")
+    if isinstance(raw, list):
+        custom = [p for p in raw if isinstance(p, str) and p]
+    return (LOCKED_CATCHALL_PATTERN, *custom)
+
+
+def _class_type_matches(class_type: Any, patterns: tuple[str, ...]) -> bool:
+    """Case-insensitive substring match. Returns False for any non-
+    string class_type so malformed nodes don't crash the walk."""
+    if not isinstance(class_type, str):
+        return False
+    lower = class_type.lower()
+    for p in patterns:
+        if p.lower() in lower:
+            return True
+    return False
+
+
+def _redact_string_value(s: str) -> str:
+    """Hash a text payload and wrap in the redaction envelope."""
+    digest = hashlib.sha256(s.encode("utf-8")).hexdigest()
+    return f"{_REDACTED_PREFIX}{digest}{_REDACTED_SUFFIX}"
+
+
+def _redact_prompt_text(prompt: Any, patterns: tuple[str, ...]) -> Any:
+    """Walk the PROMPT graph and replace text-input strings in
+    matching encoder nodes with SHA-256-hashed envelopes.
+
+    Pure function. Returns a NEW dict; does not mutate the input.
+    Non-dict prompts (None, malformed, etc.) pass through unchanged
+    so a degenerate input cannot fail the whole signing.
+
+    A node matches when:
+      isinstance(node_spec, dict)
+      and _class_type_matches(node_spec["class_type"], patterns)
+      and isinstance(node_spec["inputs"], dict)
+
+    Within a matching node's inputs dict, a field is redacted when:
+      field name (lower-cased) is in DEFAULT_TEXT_INPUT_FIELDS_LOWER
+      and isinstance(value, str)
+
+    Non-string values (numbers, lists, tensor refs) are left alone
+    even in matching fields — ComfyUI's "text" input on
+    CLIPTextEncode is normally a string, but some workflows route
+    other-node outputs through, and those values are already
+    structural (not plaintext).
+    """
+    if not isinstance(prompt, dict):
+        return prompt
+
+    out: dict = {}
+    for node_id, node_spec in prompt.items():
+        if not isinstance(node_spec, dict):
+            out[node_id] = node_spec
+            continue
+        if not _class_type_matches(node_spec.get("class_type"), patterns):
+            out[node_id] = node_spec
+            continue
+        inputs = node_spec.get("inputs")
+        if not isinstance(inputs, dict):
+            out[node_id] = node_spec
+            continue
+        new_inputs: dict = {}
+        for field_name, value in inputs.items():
+            if (
+                isinstance(field_name, str)
+                and field_name.lower() in DEFAULT_TEXT_INPUT_FIELDS_LOWER
+                and isinstance(value, str)
+            ):
+                new_inputs[field_name] = _redact_string_value(value)
+            else:
+                new_inputs[field_name] = value
+        new_node = dict(node_spec)
+        new_node["inputs"] = new_inputs
+        out[node_id] = new_node
+    return out
 
 
 # ─── Encoding ──────────────────────────────────────────────────────
@@ -153,16 +319,15 @@ def _build_generation_assertion(
     comfyui_version: str,
     batch_index: int,
     batch_size: int,
+    redacted_prompt: bool,
 ) -> dict:
     """Build the data block sent as X-Arc-Generation-Metadata.
 
-    Sends prompt VERBATIM. The redaction pass (later piece) will
-    add an inline transform on workflow_prompt and a
-    `redacted_prompt: bool` field to the returned dict so relying
-    parties can tell whether text fields are hashed or plaintext.
-    Until then both are absent — the absence of the field signals
-    "verbatim" unambiguously, and the field arrives meaningful
-    rather than as a misleading constant False.
+    Caller passes the workflow_prompt already-redacted-or-not.
+    The redacted_prompt flag tells the relying party which case it
+    is: True means text inputs in matching encoder nodes are
+    SHA-256-hashed under the [REDACTED:sha256:...] envelope; False
+    means workflow_prompt carries plaintext.
 
     batch_index and batch_size are baked into every per-image
     assertion so a relying party can see "this is image 2 of 4
@@ -182,10 +347,15 @@ def _build_generation_assertion(
         "title": title,
         "batch_index": batch_index,
         "batch_size": batch_size,
+        "redacted_prompt": redacted_prompt,
         "workflow_prompt": prompt or {},
         # extra_pnginfo typically has a "workflow" key holding the
         # editor UI graph (positions, widget values, group annotations).
         # Separate from the executable PROMPT graph; both are useful.
+        # extra_pnginfo is NOT redacted — the editor-UI graph is
+        # what creators see in their own ComfyUI; passing it through
+        # verbatim matches SaveImage behavior and the redacted
+        # workflow_prompt above is the authoritative provenance copy.
         "extra_pnginfo": extra_pnginfo or {},
         # Reserved slot for future per-image perceptual fingerprint.
         # ARC-API-3-0 addendum: confirmed the assertion path can carry
@@ -416,12 +586,15 @@ class ARCSave:
 
     @classmethod
     def INPUT_TYPES(cls):
-        # Day 1: include_prompt_text widget deliberately omitted. A
-        # visible toggle that gates nothing is worse than no toggle —
-        # creators would set it thinking it redacts, ship a workflow,
-        # and discover later their prompts went verbatim. The widget
-        # returns with the redaction pass when it actually controls
-        # behavior.
+        # include_prompt_text is the redaction toggle. Default OFF
+        # (False) means the prompt graph is redacted before signing:
+        # CLIPTextEncode-style nodes have their text inputs replaced
+        # with SHA-256-hashed envelopes. Turning it ON ships the
+        # prompt VERBATIM into the signed assertion — useful when
+        # the creator wants their wording cryptographically bound
+        # to the file (attribution, dataset provenance, etc.).
+        # Either way the structural workflow graph is preserved;
+        # only the text payloads differ.
         return {
             "required": {
                 "images": (
@@ -447,6 +620,22 @@ class ARCSave:
                         ),
                     },
                 ),
+                "include_prompt_text": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "OFF (default): prompt text in CLIPTextEncode-"
+                            "style nodes is SHA-256-hashed before signing "
+                            "(\"[REDACTED:sha256:...]\" envelope). Workflow "
+                            "structure is preserved; you can reveal the "
+                            "plaintext later and anyone can verify the "
+                            "hash. ON: prompt rides verbatim — useful when "
+                            "you want your wording cryptographically bound "
+                            "to the file."
+                        ),
+                    },
+                ),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -465,6 +654,7 @@ class ARCSave:
         images,
         filename_prefix,
         title,
+        include_prompt_text,
         prompt=None,
         extra_pnginfo=None,
         unique_id=None,
@@ -479,6 +669,18 @@ class ARCSave:
         output_dir = _resolve_output_dir(_output_dir_override)
         comfyui_version = _detect_comfyui_version()
         batch_size = len(images)
+
+        # Redaction decision is made ONCE per workflow execution and
+        # applied to all images in the batch. Same toggle setting,
+        # same prompt graph, same redaction outcome — relying
+        # parties comparing two signed files from the same batch
+        # should see identical workflow_prompt fields.
+        if include_prompt_text:
+            workflow_prompt = prompt
+        else:
+            patterns = _load_text_encoder_patterns()
+            workflow_prompt = _redact_prompt_text(prompt, patterns)
+        redacted_prompt_flag = not include_prompt_text
 
         # Per-image loop. Each image's sign is INDEPENDENT — a failure
         # on image 3 raises immediately and the workflow halts; images
@@ -497,13 +699,14 @@ class ARCSave:
             png_bytes = _encode_image_to_png_bytes(image_tensor)
 
             generation_assertion = _build_generation_assertion(
-                prompt=prompt,
+                prompt=workflow_prompt,
                 extra_pnginfo=extra_pnginfo,
                 unique_id=unique_id,
                 title=title,
                 comfyui_version=comfyui_version,
                 batch_index=batch_index,
                 batch_size=batch_size,
+                redacted_prompt=redacted_prompt_flag,
             )
 
             ingest_result = _post_to_arc_ingest_with_retry(

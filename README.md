@@ -82,15 +82,17 @@ Before any creator depends on this build, run a real workflow (SD1.5 KSampler �
 
 - Per-image encode + POST + signed-bytes write across the full batch
 - Single 2-second retry on transient errors (HTTP 503, Timeout, ConnectionError); all other non-200s raise immediately
+- **Prompt redaction by default**: the `include_prompt_text` widget defaults OFF. With it off, text inputs in CLIPTextEncode-style nodes are SHA-256-hashed in the signed assertion (workflow structure preserved; you can reveal the plaintext later and anyone can verify by re-hashing). Flip the widget ON to send the prompt verbatim.
+- **Fail-closed catch-all**: any node whose `class_type` contains the substring `textencode` (case-insensitive) gets redacted — new/unknown encoder variants stay safe by default rather than leaking plaintext.
+- **Configurable pattern list**: extend the catch-all with `text_encoder_patterns` in `arc_config.json` to cover bespoke encoders whose names don't contain `TextEncode` (e.g. T5Encoder, PromptInput). You can only ADD; the catch-all is locked.
 - `arc_config.json` + `ARC_API_KEY` env var key loading
 - Fail-loudly on any terminal error (no silent unsigned fallback)
 - Sidecar `.arc.json` per signed image with `vaultItemId` / `verifyUrl` / `contentHash`
-- Open-shape generation assertion (batch_index/size baked in; additive fingerprint slot reserved)
+- Open-shape generation assertion (`batch_index` / `batch_size` / `redacted_prompt` baked in; additive fingerprint slot reserved)
 
 ## What's NOT yet in V0
 
-- Prompt redaction — the prompt graph is currently sent VERBATIM in the assertion. The `include_prompt_text` widget intentionally does NOT ship yet; it returns with the redaction pass when it actually controls behavior.
-- ComfyUI Manager / Comfy Registry packaging
+- ComfyUI Manager / Comfy Registry packaging (the install story is currently "symlink the directory into custom_nodes/"; one-line install via Manager lands with the packaging piece)
 
 ### Rate-limit note for batch workflows
 

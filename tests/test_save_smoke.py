@@ -95,15 +95,15 @@ def main() -> int:
         ui_result = node.save(
             images=images,
             filename_prefix="smoke",
-            title="ARC-API-3-1 Day 1 smoke",
+            title="ARC-API-3-1 single-image smoke",
+            include_prompt_text=False,  # exercise the redaction default
             prompt={
                 "1": {
-                    "class_type": "FakeNode",
+                    "class_type": "CLIPTextEncode",
                     "inputs": {
                         "text": (
-                            "Day 1 sends this prompt VERBATIM to the "
-                            "signed assertion. Redaction lands in the "
-                            "next reviewable piece."
+                            "this prompt should be SHA-256 hashed in the "
+                            "signed assertion because include_prompt_text=False"
                         )
                     },
                 }
@@ -186,6 +186,7 @@ def main() -> int:
             images=batch_images,
             filename_prefix="smoke_batch",
             title="ARC-API-3-1 batch smoke",
+            include_prompt_text=True,  # exercise the verbatim path
             prompt={"1": {"class_type": "BatchFake", "inputs": {}}},
             extra_pnginfo={"workflow": {"nodes": []}},
             unique_id="smoke_batch_node",

@@ -1,4 +1,9 @@
 {
-  "_comment": "Copy this file to arc_config.json and paste the plaintext key from arc-issue-key.mjs. arc_config.json is gitignored. NEVER share, screenshot, or zip-with-share this file once populated — it holds a live API credential.",
-  "api_key": "arc_live_REPLACE_WITH_YOUR_KEY_FROM_arc-issue-key.mjs"
+  "_comment_api_key": "Copy this file to arc_config.json and paste the plaintext key from arc-issue-key.mjs. arc_config.json is gitignored. NEVER share, screenshot, or zip-with-share this file once populated — it holds a live API credential.",
+  "api_key": "arc_live_REPLACE_WITH_YOUR_KEY_FROM_arc-issue-key.mjs",
+
+  "_comment_text_encoder_patterns": "Optional. Case-insensitive substrings appended to the locked 'textencode' catch-all when redaction runs. Use this to ADD patterns for bespoke encoder class_types whose names don't contain 'TextEncode' (e.g. T5Encoder, PromptInput). You cannot REMOVE the catch-all — new/unknown encoder variants stay fail-closed by default. Delete this whole field if you don't need extras.",
+  "text_encoder_patterns": [
+    "t5encoder"
+  ]
 }
