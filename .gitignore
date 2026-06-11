@@ -1,0 +1,21 @@
+# API credentials — NEVER commit
+arc_config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Build artifacts
+build/
+dist/

@@ -1,0 +1,7 @@
+# ComfyUI ARC Save — Day 1 dependencies.
+# Pinned conservatively. ComfyUI itself ships numpy and Pillow at
+# compatible versions; the version specs here protect standalone
+# test runs (tests/test_save_smoke.py) outside a ComfyUI install.
+numpy>=1.26
+Pillow>=10.0
+requests>=2.31

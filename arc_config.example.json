@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy this file to arc_config.json and paste the plaintext key from arc-issue-key.mjs. arc_config.json is gitignored. NEVER share, screenshot, or zip-with-share this file once populated — it holds a live API credential.",
+  "api_key": "arc_live_REPLACE_WITH_YOUR_KEY_FROM_arc-issue-key.mjs"
+}
