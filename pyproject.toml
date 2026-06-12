@@ -6,10 +6,8 @@
 #   - ComfyUI Manager's custom-node-list.json entry (B2c) references
 #     this repo + this file as the authoritative spec.
 #
-# PublisherId is the one placeholder pending operator's registry
-# registration at https://registry.comfy.org. Once registered, replace
-# PUBLISHER_ID_PLACEHOLDER with the literal published id (e.g.
-# "arcvelvet" if that handle is available).
+# PublisherId is the operator's Comfy Registry publisher handle,
+# registered at https://registry.comfy.org. Value: "arcvelvet".
 
 [project]
 name = "comfyui-arc-save"
@@ -56,11 +54,9 @@ Issues        = "https://github.com/arcvelvet/comfyui-arc-save/issues"
 # Comfy Registry-specific block. Schema reference:
 #   https://docs.comfy.org/registry/specifications
 # The PublisherId is namespaced under the operator's registry account
-# and is independent of the GitHub org. Operator registers at
-# https://registry.comfy.org before publication; placeholder below
-# becomes the literal id at that time.
+# and is independent of the GitHub org name.
 [tool.comfy]
-PublisherId  = "PUBLISHER_ID_PLACEHOLDER"
+PublisherId  = "arcvelvet"
 DisplayName  = "ARC Save (sign on arrival)"
 Icon         = "https://arcvelvet.com/assets/Provenance-seal.png"
 includes     = ["nodes/", "__init__.py", "README.md", "LICENSE", "requirements.txt"]

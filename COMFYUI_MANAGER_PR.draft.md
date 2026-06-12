@@ -5,7 +5,7 @@ This document captures the prepared submission to [ltdrdata/ComfyUI-Manager](htt
 ## Prerequisites (operator side, before this PR opens)
 
 1. The repo `github.com/arcvelvet/comfyui-arc-save` (or whichever org+name is finalized) must be public.
-2. The repo's `pyproject.toml` (B2a) must reference a real PublisherId, not the `PUBLISHER_ID_PLACEHOLDER` literal.
+2. The repo's `pyproject.toml` (B2a) references the registered Comfy Registry PublisherId `arcvelvet` (done — registered 2026-06-12).
 3. A first release tag should exist (e.g. `v0.1.0`) so Manager's install path has a stable reference.
 
 If the GitHub org name changes from `arcvelvet`, update `reference`, `files`, and any URL in this draft before opening.
