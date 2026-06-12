@@ -47,9 +47,9 @@ dependencies = [
 
 [project.urls]
 Homepage      = "https://arcvelvet.com"
-Repository    = "https://github.com/arcvelvet/comfyui-arc-save"
+Repository    = "https://github.com/arcvelvetOS/comfyui-arc-save"
 Documentation = "https://arcvelvet.com/docs/comfyui-arc-save"
-Issues        = "https://github.com/arcvelvet/comfyui-arc-save/issues"
+Issues        = "https://github.com/arcvelvetOS/comfyui-arc-save/issues"
 
 # Comfy Registry-specific block. Schema reference:
 #   https://docs.comfy.org/registry/specifications

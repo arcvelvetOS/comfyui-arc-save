@@ -4,11 +4,9 @@ This document captures the prepared submission to [ltdrdata/ComfyUI-Manager](htt
 
 ## Prerequisites (operator side, before this PR opens)
 
-1. The repo `github.com/arcvelvet/comfyui-arc-save` (or whichever org+name is finalized) must be public.
-2. The repo's `pyproject.toml` (B2a) references the registered Comfy Registry PublisherId `arcvelvet` (done — registered 2026-06-12).
+1. The repo `github.com/arcvelvetOS/comfyui-arc-save` must be public.
+2. The repo's `pyproject.toml` (B2a) references the registered Comfy Registry PublisherId `arcvelvet` (done — registered 2026-06-12). Note: PublisherId and GitHub org name are independent; the publisher handle stays `arcvelvet` even though the GitHub org is `arcvelvetOS`.
 3. A first release tag should exist (e.g. `v0.1.0`) so Manager's install path has a stable reference.
-
-If the GitHub org name changes from `arcvelvet`, update `reference`, `files`, and any URL in this draft before opening.
 
 ## PR target
 
@@ -25,9 +23,9 @@ The file holds a top-level `custom_nodes` array. Insert this object in alphabeti
   "author": "ArcVelvet Studios LLC",
   "title": "ARC Save (sign on arrival)",
   "id": "comfyui-arc-save",
-  "reference": "https://github.com/arcvelvet/comfyui-arc-save",
+  "reference": "https://github.com/arcvelvetOS/comfyui-arc-save",
   "files": [
-    "https://github.com/arcvelvet/comfyui-arc-save"
+    "https://github.com/arcvelvetOS/comfyui-arc-save"
   ],
   "install_type": "git-clone",
   "description": "Sign-on-arrival save node for ArcVelvetOS. Replaces ComfyUI's SaveImage: POSTs the encoded image to the ArcVelvet arcIngest API and writes the C2PA-signed copy returned by the server. The unsigned bytes never touch disk. Each saved file carries a platform-attested C2PA manifest with embedded generation parameters, a verify URL, and a vault-bound record id. Prompt redaction defaults ON (text-encoder inputs are SHA-256 hashed in the assertion; flip a config toggle to send verbatim). Requires an arc:sign-scoped API key issued through the ArcVelvet Credentials surface."
@@ -74,4 +72,4 @@ Adds **ARC Save (sign on arrival)** to the Manager listing.
 ## Notes
 
 - The Manager listing is independent of the Comfy Registry. Both exist; the Registry is the official packaging index that pyproject.toml feeds, while Manager is a community-maintained installer UI shipped inside ComfyUI. We submit to both — Registry first (B2b), then Manager (this draft).
-- If Registry approval reveals a different canonical id (e.g. `arcvelvet/comfyui-arc-save` rather than the bare `comfyui-arc-save`), update the `id` field in the JSON entry above before opening.
+- If Registry approval reveals a different canonical id (e.g. `arcvelvetOS/comfyui-arc-save` rather than the bare `comfyui-arc-save`), update the `id` field in the JSON entry above before opening.
