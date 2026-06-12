@@ -1,0 +1,66 @@
+# ComfyUI ARC Save — packaging metadata for Comfy Registry + ComfyUI Manager.
+#
+# This file is the canonical metadata source. Both surfaces consume it:
+#   - Comfy Registry (registry.comfy.org) reads `[project]` and
+#     `[tool.comfy]` at submission and on every published version.
+#   - ComfyUI Manager's custom-node-list.json entry (B2c) references
+#     this repo + this file as the authoritative spec.
+#
+# PublisherId is the one placeholder pending operator's registry
+# registration at https://registry.comfy.org. Once registered, replace
+# PUBLISHER_ID_PLACEHOLDER with the literal published id (e.g.
+# "arcvelvet" if that handle is available).
+
+[project]
+name = "comfyui-arc-save"
+version = "0.1.0"
+description = "Sign-on-arrival save node for ArcVelvetOS. POSTs the encoded image to the ArcVelvet arcIngest API and writes the C2PA-signed copy returned by the server. The unsigned bytes never touch disk."
+authors = [
+  { name = "ArcVelvet Studios LLC", email = "support@arcvelvet.com" },
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: OS Independent",
+  "Intended Audience :: End Users/Desktop",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Security :: Cryptography",
+]
+keywords = [
+  "comfyui",
+  "comfyui-custom-node",
+  "c2pa",
+  "content-credentials",
+  "provenance",
+  "sign-on-arrival",
+  "arcvelvet",
+]
+dependencies = [
+  "numpy>=1.26",
+  "Pillow>=10.0",
+  "requests>=2.31",
+]
+
+[project.urls]
+Homepage      = "https://arcvelvet.com"
+Repository    = "https://github.com/arcvelvet/comfyui-arc-save"
+Documentation = "https://arcvelvet.com/docs/comfyui-arc-save"
+Issues        = "https://github.com/arcvelvet/comfyui-arc-save/issues"
+
+# Comfy Registry-specific block. Schema reference:
+#   https://docs.comfy.org/registry/specifications
+# The PublisherId is namespaced under the operator's registry account
+# and is independent of the GitHub org. Operator registers at
+# https://registry.comfy.org before publication; placeholder below
+# becomes the literal id at that time.
+[tool.comfy]
+PublisherId  = "PUBLISHER_ID_PLACEHOLDER"
+DisplayName  = "ARC Save (sign on arrival)"
+Icon         = "https://arcvelvet.com/assets/Provenance-seal.png"
+includes     = ["nodes/", "__init__.py", "README.md", "LICENSE", "requirements.txt"]
