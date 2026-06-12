@@ -96,7 +96,7 @@ Before any creator depends on this build, run a real workflow (SD1.5 KSampler â†
 
 ### Rate-limit note for batch workflows
 
-`arcIngest` allows 10 signings per minute per API key. A batch of 11+ images will trigger `ERR_RATE_LIMITED` partway through and the node will halt with the exact failure point named. Images already signed before the rate-limit hit are saved (and on rerun, the content-hash idempotency on the server will dedup them so you don't double-charge). For larger batches, either wait a minute and rerun the same workflow, or split the batch upstream.
+`arcIngest` allows 5 signings per minute per API key (free-door cap; Sprint A0 tightening) plus 20 signings per minute per uid as an aggregate cap across all keys on the same account. A batch of 6+ images on one key, or 21+ across keys on one account, will trigger `ERR_RATE_LIMITED` partway through and the node will halt with the exact failure point named. Images already signed before the rate-limit hit are saved (and on rerun, the content-hash idempotency on the server will dedup them so you don't double-charge). For larger batches, either wait a minute and rerun the same workflow, or split the batch upstream.
 
 ## Cert status (read before sharing signed files publicly)
 

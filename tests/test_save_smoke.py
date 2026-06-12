@@ -25,7 +25,7 @@ Exit code: 0 on PASS, 1 on FAIL. PASS criteria:
     - sidecar verifyUrl matches the locked vault shape
 
 Cost per run: one arcIngest invocation against the live deploy
-(~1-2 seconds, well under the 10/min rate limit per key). The smoke
+(~1-2 seconds, well under the 5/min rate limit per key — A0 tightening). The smoke
 test uploads a 64x64 random-noise PNG (~16 KB) so storage/egress
 cost per run is negligible. Test artifacts are cleaned up on PASS;
 on FAIL the temp dir is preserved for diagnosis.

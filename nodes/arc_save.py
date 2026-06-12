@@ -800,11 +800,14 @@ class ARCSave:
         # Fail-loud posture applies per-image: any non-retryable error
         # on any image stops the batch.
         #
-        # Rate-limit note: arcIngest is 10/min per API key. A batch of
-        # 11+ images will trigger ERR_RATE_LIMITED partway through and
-        # raise loudly with the exact failure point. The creator
-        # decides whether to wait + re-run (idempotent dedup on the
-        # already-saved images) or to split the workflow.
+        # Rate-limit note: arcIngest is 5/min per API key (free-door cap;
+        # Sprint A0 tightening) PLUS 20/min per uid as an aggregate cap
+        # across all keys on the same account. A batch of 6+ images on
+        # one key, or 21+ across keys on one uid, will trigger
+        # ERR_RATE_LIMITED partway through and raise loudly with the
+        # exact failure point. The creator decides whether to wait +
+        # re-run (idempotent dedup on the already-saved images) or to
+        # split the workflow.
         saved_filenames: list[str] = []
         for batch_index, image_tensor in enumerate(images):
             png_bytes = _encode_image_to_png_bytes(image_tensor)
