@@ -29,6 +29,13 @@ Cost per run: one arcIngest invocation against the live deploy
 test uploads a 64x64 random-noise PNG (~16 KB) so storage/egress
 cost per run is negligible. Test artifacts are cleaned up on PASS;
 on FAIL the temp dir is preserved for diagnosis.
+
+Transport (B1-FIX-1): save() POSTs as multipart/form-data with
+'image' and 'metadata' parts. The legacy header transport
+(X-Arc-Generation-Metadata base64-encoded) was removed after the
+first real ComfyUI run hit HTTP 431 at GFE. Smoke continues to
+exercise save() end-to-end and inherits the new transport
+automatically; no header-transport assertions remain.
 """
 
 from __future__ import annotations

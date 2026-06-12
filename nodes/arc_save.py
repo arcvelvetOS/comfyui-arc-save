@@ -54,7 +54,6 @@ Additive-fingerprint slot (ARC-API-3-0 addendum):
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import io
 import json
@@ -406,28 +405,48 @@ def _post_to_arc_ingest(
         reissue a key, back off rate, shrink payload) or server
         bugs that won't fix themselves in 2 seconds.
 
-    The X-Arc-Title header is URL-encoded so non-ASCII titles ride
-    through without HTTP header byte-set violations. The server
-    URL-decodes on receipt. X-Arc-Generation-Metadata is base64-
-    encoded JSON; the server validates ≤ 64 KB decoded.
+    Transport (B1-FIX-1): multipart/form-data with 'image' (raw
+    PNG bytes) and 'metadata' (JSON object) parts. The legacy
+    header transport (image bytes as body + X-Arc-Generation-
+    Metadata base64-encoded header) had a quiet GFE 431 cliff
+    that fell over on the first real ComfyUI workflow. The body
+    transport has no header-size ceiling.
+
+    X-Arc-Title remains a header (small, bounded; encoded via
+    URL-quoting so non-ASCII titles ride through without HTTP
+    header byte-set violations).
+
+    The 431 path is kept as a safety net even though multipart
+    eliminates the failure mode: if any future change to the
+    transport (header bloat from a new SDK middleware, proxy
+    config etc.) re-introduces it, the message stays actionable
+    rather than trailing into a dash.
     """
     encoded_title = quote(title or "", safe="")
-    encoded_metadata = base64.b64encode(
-        json.dumps(generation_assertion, separators=(",", ":")).encode("utf-8")
-    ).decode("ascii")
+    metadata_json = json.dumps(
+        generation_assertion, separators=(",", ":")
+    ).encode("utf-8")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "image/png",
         "X-Arc-Title": encoded_title,
-        "X-Arc-Generation-Metadata": encoded_metadata,
+    }
+
+    # requests builds the multipart body when 'files' is passed. The
+    # filename slot is intentionally None on the metadata part so the
+    # server's busboy parser sees it as a regular form field (no
+    # filename in Content-Disposition); the image part carries a
+    # filename so it surfaces as a file event.
+    files = {
+        "image": ("image.png", png_bytes, "image/png"),
+        "metadata": (None, metadata_json, "application/json"),
     }
 
     try:
         resp = requests.post(
             INGEST_URL,
             headers=headers,
-            data=png_bytes,
+            files=files,
             timeout=INGEST_TIMEOUT_SECONDS,
         )
     except (requests.Timeout, requests.ConnectionError) as e:
@@ -454,12 +473,25 @@ def _post_to_arc_ingest(
             f"server unavailable: HTTP 503 {resp.text[:200]}"
         )
 
+    if resp.status_code == 431:
+        # Safety net for a transport-layer regression. The current
+        # multipart-only path puts metadata in the body and shouldn't
+        # trip this; if it does, that's a node bug.
+        raise RuntimeError(
+            "ArcVelvet ingest failed: HTTP 431 (Request Header Fields "
+            "Too Large). Headers exceeded the transport limit even "
+            "though metadata is sent in the body. This is a node bug. "
+            "Please open an issue at "
+            "https://github.com/arcvelvetOS/comfyui-arc-save/issues."
+        )
+
     # Any other non-200 — terminal. Surface the server's stable error
     # code (ERR_AUTH_FAILED, ERR_RATE_LIMITED, ERR_PAYLOAD_TOO_LARGE,
-    # ERR_SIGN_FAILED, etc.) so the creator can act without digging.
+    # ERR_METADATA_TOO_LARGE, ERR_SIGN_FAILED, etc.) so the creator can
+    # act without digging.
     body_preview = resp.text[:400]
     raise RuntimeError(
-        f"ArcVelvet ingest failed: HTTP {resp.status_code} — {body_preview}"
+        f"ArcVelvet ingest failed: HTTP {resp.status_code} - {body_preview}"
     )
 
 
