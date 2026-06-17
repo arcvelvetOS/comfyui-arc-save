@@ -2,11 +2,13 @@
 
 Sign-on-arrival save node for ArcVelvetOS. Replaces ComfyUI's `SaveImage` — encodes the image, POSTs the bytes to the ArcVelvet ingest API, writes the C2PA-signed copy returned by the server to your output directory.
 
-**Status: v1.0.2 — server-side prompt moderation + manifest redaction. Install by cloning into your ComfyUI `custom_nodes/` directory; one-line install via ComfyUI Manager is on the way.**
+**Status: v1.0.3 — server-side prompt moderation + manifest redaction. Install by cloning into your ComfyUI `custom_nodes/` directory; one-line install via ComfyUI Manager is on the way.**
 
 ## Why this node
 
-ComfyUI's default `SaveImage` writes an unsigned PNG to disk. ARC Save signs the file before it touches disk: the unsigned bytes never exist on the file system. The signed PNG carries a C2PA manifest with platform-attested identity, your generation workflow, and a vault-bound verify URL — a verifiable provenance record that any reader implementing the open C2PA standard can inspect.
+ComfyUI's default `SaveImage` writes an unsigned PNG to disk. ARC Save signs the file before it touches disk: the unsigned bytes never exist on the file system. The signed PNG carries a C2PA manifest with platform-attested identity, your generation workflow, and a vault-bound verify URL — readable by any tool that implements the open C2PA standard.
+
+Signing happens on ArcVelvet's servers, not in ComfyUI. When the node runs, your image bytes are POSTed over HTTPS to ArcVelvet's ingest API, signed there against ArcVelvet's C2PA keys, and the credentialed copy is returned and written to your output directory. The unsigned original never touches your disk, but it does leave your machine — the server-side signing is what allows the manifest to carry a platform-attested identity. If your workflow requires that image bytes never leave your local environment, this node is not for you.
 
 ## Setup
 
@@ -79,7 +81,7 @@ Run a real workflow (SD1.5 KSampler → VAE Decode → ARC Save) end-to-end thro
 - Per-image encode + POST + signed-bytes write across the full batch
 - Single 2-second retry on transient errors (HTTP 503, Timeout, ConnectionError); all other non-200s raise immediately
 - **Prompt moderation + privacy**:
-  - Prompts are scanned **in-flight by the ArcVelvet server** for minor-safety violations and **discarded on pass**. The plaintext prompt corpus never persists on the server — it lives only in the in-flight scan, then goes out of scope.
+  - Prompts are scanned **in-flight** for minor-safety violations and **not stored on ArcVelvet's servers on pass**. The scan itself is performed by a third-party moderation provider (OpenAI's `omni-moderation` endpoint) over HTTPS, so your prompt text is transmitted to OpenAI for the duration of the scan and goes out of scope at both ArcVelvet and OpenAI on completion. ("Not stored" is a storage claim, not a transmission claim — the scan requires the transmission.)
   - **Plaintext prompts never enter the public C2PA manifest unless you opt in.** The `include_prompt_text` widget defaults OFF. With it off, the server walks `workflow_prompt` and replaces text-encoder text values with `[REDACTED:sha256:<hex>]` envelopes before signing — the manifest carries the workflow structure (model, sampler, seed, connectivity) but blinds the prompt text. Flip the widget ON to send the prompt verbatim into your signed manifest.
   - **Server is the redaction authority.** Earlier versions (pre-1.0.0) hashed prompt text on the node side. As of 1.0.0 the node sends `workflow_prompt` plaintext and a separate `promptTextForModeration` field; the server is responsible for the manifest redaction step and is the single source of truth for what becomes a hash. This avoids drift between client-version walks and what the server expects to extract.
   - **Refusal on a sexual/minors hit**: the server returns HTTP 451 `PROMPT_FLAGGED` and the node raises a clear error. The flagged prompt is preserved in a sealed, client-inaccessible collection for the ArcVelvet operator to handle (NCMEC handoff pipeline). For any non-pass moderation outcome (`MODERATION_UNAVAILABLE` on timeout / OpenAI errors), the node raises with the server's message.
