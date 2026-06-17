@@ -11,7 +11,7 @@
 
 [project]
 name = "comfyui-arc-save"
-version = "1.0.2"
+version = "1.0.3"
 description = "Sign-on-arrival save node for ArcVelvetOS. POSTs the encoded image to the ArcVelvet arcIngest API and writes the C2PA-signed copy returned by the server. The unsigned bytes never touch disk. Prompt moderation runs server-side: prompts are scanned in-flight for minor-safety violations and discarded on pass; plaintext prompts never enter the public C2PA manifest unless you opt in."
 authors = [
   { name = "ArcVelvet Studios LLC", email = "support@arcvelvet.com" },
