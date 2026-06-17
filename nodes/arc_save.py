@@ -1,5 +1,5 @@
 """
-arc_save.py — ARC-API-3-1 Day 1 scope
+arc_save.py — v1.0.0 (MINOR-SAFETY-1 Sprint 2C cutover)
 
 The ARC Save ComfyUI custom node. Encodes the input IMAGE tensor to
 PNG bytes (matching SaveImage's encoding path exactly), POSTs to the
@@ -7,54 +7,59 @@ live ArcVelvet arcIngest endpoint, downloads the signed copy, writes
 the signed PNG plus a sidecar .arc.json receipt to the output
 directory.
 
-Current scope (Day 1 + batch/retry + redaction):
+Wire contract (v1.0.0):
     - Per-image loop across the IMAGE batch tensor.
     - Single retry with 2-second backoff on TRANSIENT errors only
       (HTTP 503 + requests.Timeout + requests.ConnectionError).
       Every other non-200 (401/403/413/415/429/500/etc.) raises
-      immediately — no retry for terminal failures.
-    - Prompt redaction (REDACTION PASS, this commit):
-        - include_prompt_text widget in INPUT_TYPES, default False
-          (redact). True bypasses redaction; prompt text passes
-          verbatim into the cryptographic assertion.
-        - When False: walk the PROMPT graph, find any node whose
-          class_type matches the configured pattern list, and
-          replace string values in known text-input field names
-          with SHA-256 hashes envelope-wrapped as
-              "[REDACTED:sha256:<64hex>]"
-          The workflow structure is preserved; only the text
-          payloads are hashed. A creator who later wants to prove
-          a specific prompt produced this image can reveal the
-          plaintext and any relying party hashes it to verify.
-        - Pattern list = LOCKED_CATCHALL_PATTERN ("textencode",
-          case-insensitive substring) PLUS the optional
-          text_encoder_patterns field in arc_config.json. The
-          catch-all is fail-closed — new/unknown CLIPTextEncode-
-          like variants redact rather than leak. Creators can
-          ADD patterns; they cannot REMOVE the catch-all.
-        - generation assertion gains a meaningful
-          redacted_prompt: bool field so relying parties can
-          tell whether text fields in workflow_prompt are
-          plaintext or hashes.
-    - arc_config.json + ARC_API_KEY env var key loading
-    - Sidecar .arc.json with vaultItemId / verifyUrl / contentHash
+      immediately.
+    - Three prompt-related fields in the generation assertion:
+        workflow_prompt:           PLAINTEXT ComfyUI PROMPT graph.
+                                   Server is the manifest-redaction
+                                   authority and walks this with the
+                                   same pattern set the node uses to
+                                   extract for moderation.
+        promptTextForModeration:   Concatenated plaintext from text-
+                                   encoder nodes. Server scans via
+                                   OpenAI moderation and DISCARDS on
+                                   pass; preserves in a sealed
+                                   minor_safety_escalations doc on a
+                                   sexual/minors flag (NCMEC handoff
+                                   pipeline). NEVER in the manifest.
+        include_prompt_text:       Creator opt-in BOOLEAN. When false
+                                   (default), the server replaces text-
+                                   encoder text values with
+                                   [REDACTED:sha256:<hex>] envelopes
+                                   before signing the manifest. When
+                                   true, the server embeds plaintext.
+    - The node-side `redacted_prompt` field is no longer set by the
+      node. The server sets it based on include_prompt_text and writes
+      it into the signed manifest assertion.
+    - Local redaction code (LOCKED_CATCHALL_PATTERN, _redact_prompt_text,
+      _redact_string_value, text_encoder_patterns config) is REMOVED.
+      The node retains the same walk pattern for EXTRACTION only —
+      see _extract_prompt_text_for_moderation().
+    - arc_config.json + ARC_API_KEY env var key loading.
+    - Sidecar .arc.json with vaultItemId / verifyUrl / contentHash.
 
-Out of current scope (later pieces):
-    - Manager / Registry packaging (pyproject.toml for the
-      Comfy Registry + a PR against the ComfyUI Manager
-      custom-node-list.json)
+Why server-side redaction (over client-side):
+    A single canonical redaction authority avoids the trust gap where
+    each node-version's local walk can drift from the server's
+    expectation. The server's promptModeration.ts walks workflow_prompt
+    with the IDENTICAL substring catch-all ("textencode") and field-
+    name match (/text|prompt/i) the node uses here for extraction. The
+    walks are pinned in lockstep so the corpus the node sends matches
+    what the server would have extracted on its own.
 
-Additive-fingerprint slot (ARC-API-3-0 addendum):
+Additive-fingerprint slot (ARC-API-3-0 addendum, unchanged):
     The generation assertion is built as an open dict. A future
     perceptual-fingerprint block can be added as a top-level
     namespaced key (e.g. "fingerprint": {...}) without restructuring
-    any of the call sites here. Same compatibility posture as
-    com.arcvelvet.generation's loose-typed union member on the server.
+    any of the call sites here.
 """
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import os
@@ -99,19 +104,38 @@ RETRY_BACKOFF_SECONDS = 2.0
 # compress_level=4 default for output files; PreviewImage uses 1).
 PNG_COMPRESS_LEVEL = 4
 
-# ── Redaction config ──────────────────────────────────────────────
-# LOCKED catch-all substring (case-insensitive). Cannot be removed
-# via arc_config.json — creators can only ADD patterns. Fail-closed
-# default: any class_type containing "textencode" gets redacted.
-LOCKED_CATCHALL_PATTERN = "textencode"
+# ── Prompt extraction config (1.0.0 cutover) ──────────────────────
+#
+# MINOR-SAFETY-1 Sprint 2C cutover: as of v1.0.0, the SERVER is the
+# manifest-redaction authority. The node no longer hashes text fields
+# before sending. Instead, the node:
+#
+#   1. Always sends `workflow_prompt` PLAINTEXT to arcIngest.
+#   2. Always sends a NEW field `promptTextForModeration` carrying the
+#      concatenated plaintext from text-encoder nodes — this is the
+#      corpus the server feeds to OpenAI moderation. The server discards
+#      it on pass; on a flagged hit the server preserves it in the
+#      sealed minor_safety_escalations collection for NCMEC handoff
+#      (see ArcVelvet server-side policy docs).
+#   3. Sends `include_prompt_text` as a creator opt-in BOOLEAN. When
+#      false (default), the server walks workflow_prompt and replaces
+#      text-encoder text values with [REDACTED:sha256:<hex>] envelopes
+#      before signing the manifest. When true, the server embeds
+#      plaintext in the manifest.
+#
+# The node-side LOCKED_CATCHALL_PATTERN and the field-name walk live on
+# in TEXTENCODE_CATCHALL / TEXT_INPUT_FIELDS_LOWER below, but they are
+# now used ONLY to compute promptTextForModeration (extraction), NOT
+# to redact (transformation). The server uses the IDENTICAL walk to
+# ensure node corpus matches server extraction.
+TEXTENCODE_CATCHALL = "textencode"
 
-# Field names whose string values get hashed when the parent node
-# matches the encoder pattern list. Covers vanilla CLIPTextEncode
-# ("text"), CLIPTextEncodeSDXL ("text_g", "text_l"), and the common
-# positive/negative split used by many workflows. Lowercase for
-# case-insensitive matching against arbitrary case (e.g. "Text",
-# "PROMPT") in custom encoder shapes.
-DEFAULT_TEXT_INPUT_FIELDS_LOWER = (
+# Field names whose string values get extracted for the moderation
+# corpus. Covers vanilla CLIPTextEncode ("text"), CLIPTextEncodeSDXL
+# ("text_g", "text_l"), and the common positive/negative split used
+# by many workflows. Lowercase for case-insensitive matching against
+# arbitrary case (e.g. "Text", "PROMPT") in custom encoder shapes.
+TEXT_INPUT_FIELDS_LOWER = (
     "text",
     "prompt",
     "text_g",
@@ -120,13 +144,6 @@ DEFAULT_TEXT_INPUT_FIELDS_LOWER = (
     "negative",
     "string",
 )
-
-# Envelope around each hash so a relying party reading the assertion
-# can identify the redaction unambiguously. The envelope IS structured
-# so anyone who later receives the plaintext can hash it and check
-# match without parsing tooling.
-_REDACTED_PREFIX = "[REDACTED:sha256:"
-_REDACTED_SUFFIX = "]"
 
 
 # ─── Config + API key loading ──────────────────────────────────────
@@ -178,111 +195,62 @@ def _load_api_key() -> str:
     )
 
 
-# ─── Redaction ─────────────────────────────────────────────────────
+# ─── Prompt extraction (for moderation) ────────────────────────────
 
 
-def _load_text_encoder_patterns() -> tuple[str, ...]:
-    """Return the active text-encoder pattern list.
+def _is_textencode_node(class_type: Any) -> bool:
+    """Case-insensitive substring match against TEXTENCODE_CATCHALL.
+    Returns False for any non-string class_type so malformed nodes
+    don't crash the walk.
 
-    Composition:
-      LOCKED_CATCHALL_PATTERN (always included; cannot be removed)
-      + optional creator-supplied patterns from arc_config.json's
-        text_encoder_patterns array
-
-    Each pattern is a case-insensitive SUBSTRING checked against
-    each node's class_type. A node's class_type matches the
-    pattern list if ANY pattern is a substring of the lower-cased
-    class_type.
-
-    Invalid arc_config.json entries (non-string, empty string) are
-    silently skipped; a typo'd patterns list does NOT prevent
-    redaction — the catch-all still fires.
+    Mirrors the server's isTextEncodeNode() in promptModeration.ts to
+    guarantee node corpus extraction matches server-side extraction —
+    this is the contract that makes the gate's moderation decision
+    reproducible across the wire.
     """
-    custom: list[str] = []
-    try:
-        cfg = _load_arc_config()
-    except RuntimeError:
-        # _load_arc_config raises on malformed JSON. If we got here
-        # via the save() path, _load_api_key has already raised the
-        # same error first — the workflow halted. If we got here via
-        # the unit-test path, defaults-only is the right fallback.
-        return (LOCKED_CATCHALL_PATTERN,)
-    raw = cfg.get("text_encoder_patterns")
-    if isinstance(raw, list):
-        custom = [p for p in raw if isinstance(p, str) and p]
-    return (LOCKED_CATCHALL_PATTERN, *custom)
-
-
-def _class_type_matches(class_type: Any, patterns: tuple[str, ...]) -> bool:
-    """Case-insensitive substring match. Returns False for any non-
-    string class_type so malformed nodes don't crash the walk."""
     if not isinstance(class_type, str):
         return False
-    lower = class_type.lower()
-    for p in patterns:
-        if p.lower() in lower:
-            return True
-    return False
+    return TEXTENCODE_CATCHALL in class_type.lower()
 
 
-def _redact_string_value(s: str) -> str:
-    """Hash a text payload and wrap in the redaction envelope."""
-    digest = hashlib.sha256(s.encode("utf-8")).hexdigest()
-    return f"{_REDACTED_PREFIX}{digest}{_REDACTED_SUFFIX}"
+def _is_text_field(field_name: Any) -> bool:
+    """Field-name match against TEXT_INPUT_FIELDS_LOWER. Mirrors the
+    server's isTextField() in promptModeration.ts."""
+    if not isinstance(field_name, str):
+        return False
+    return field_name.lower() in TEXT_INPUT_FIELDS_LOWER
 
 
-def _redact_prompt_text(prompt: Any, patterns: tuple[str, ...]) -> Any:
-    """Walk the PROMPT graph and replace text-input strings in
-    matching encoder nodes with SHA-256-hashed envelopes.
+def _extract_prompt_text_for_moderation(prompt: Any) -> str:
+    """Walk the PROMPT graph and return the concatenated plaintext
+    from every text-encoder node's text-input field, joined by '\\n'.
 
-    Pure function. Returns a NEW dict; does not mutate the input.
-    Non-dict prompts (None, malformed, etc.) pass through unchanged
-    so a degenerate input cannot fail the whole signing.
+    This is the corpus the server feeds to OpenAI moderation. The
+    walk MUST match the server-side extractPromptCorpus() walk in
+    functions/src/moderation/promptModeration.ts so the corpus the
+    node generates is byte-identical to what the server would extract
+    from workflow_prompt itself.
 
-    A node matches when:
-      isinstance(node_spec, dict)
-      and _class_type_matches(node_spec["class_type"], patterns)
-      and isinstance(node_spec["inputs"], dict)
-
-    Within a matching node's inputs dict, a field is redacted when:
-      field name (lower-cased) is in DEFAULT_TEXT_INPUT_FIELDS_LOWER
-      and isinstance(value, str)
-
-    Non-string values (numbers, lists, tensor refs) are left alone
-    even in matching fields — ComfyUI's "text" input on
-    CLIPTextEncode is normally a string, but some workflows route
-    other-node outputs through, and those values are already
-    structural (not plaintext).
+    Pure function. Does not mutate the input. Non-dict prompts pass
+    through to '' so a degenerate input doesn't crash the signing.
     """
     if not isinstance(prompt, dict):
-        return prompt
-
-    out: dict = {}
+        return ""
+    texts: list[str] = []
     for node_id, node_spec in prompt.items():
         if not isinstance(node_spec, dict):
-            out[node_id] = node_spec
             continue
-        if not _class_type_matches(node_spec.get("class_type"), patterns):
-            out[node_id] = node_spec
+        if not _is_textencode_node(node_spec.get("class_type")):
             continue
         inputs = node_spec.get("inputs")
         if not isinstance(inputs, dict):
-            out[node_id] = node_spec
             continue
-        new_inputs: dict = {}
         for field_name, value in inputs.items():
-            if (
-                isinstance(field_name, str)
-                and field_name.lower() in DEFAULT_TEXT_INPUT_FIELDS_LOWER
-                and isinstance(value, str)
-            ):
-                new_inputs[field_name] = _redact_string_value(value)
-            else:
-                new_inputs[field_name] = value
-        new_node = dict(node_spec)
-        new_node["inputs"] = new_inputs
-        out[node_id] = new_node
-    return out
+            if not _is_text_field(field_name):
+                continue
+            if isinstance(value, str) and value:
+                texts.append(value)
+    return "\n".join(texts)
 
 
 # ─── Encoding ──────────────────────────────────────────────────────
@@ -329,25 +297,34 @@ def _build_generation_assertion(
     comfyui_version: str,
     batch_index: int,
     batch_size: int,
-    redacted_prompt: bool,
+    include_prompt_text: bool,
+    prompt_text_for_moderation: str,
 ) -> dict:
-    """Build the data block sent as X-Arc-Generation-Metadata.
+    """Build the metadata block POSTed as the multipart `metadata` part
+    of the arcIngest request.
 
-    Caller passes the workflow_prompt already-redacted-or-not.
-    The redacted_prompt flag tells the relying party which case it
-    is: True means text inputs in matching encoder nodes are
-    SHA-256-hashed under the [REDACTED:sha256:...] envelope; False
-    means workflow_prompt carries plaintext.
+    1.0.0 cutover (MINOR-SAFETY-1 Sprint 2C):
+      - `workflow_prompt` is always sent PLAINTEXT. The server is the
+        manifest-redaction authority and walks workflow_prompt with the
+        SAME pattern set used here for extraction; when
+        include_prompt_text=false (default), the server replaces text-
+        encoder text values with [REDACTED:sha256:<hex>] envelopes
+        BEFORE signing the manifest. The node-side `redacted_prompt`
+        assertion field is no longer set by the node — the server sets
+        it based on include_prompt_text.
+      - `promptTextForModeration` carries the concatenated plaintext
+        from text-encoder nodes for OpenAI moderation. Server discards
+        on pass; preserves in a sealed collection on a sexual/minors
+        flag (NCMEC handoff). NEVER in the manifest.
+      - `include_prompt_text` is the creator's opt-in boolean,
+        forwarded so the server knows whether to redact for manifest.
 
     batch_index and batch_size are baked into every per-image
-    assertion so a relying party can see "this is image 2 of 4
-    from the same workflow execution." Useful for video frame
-    chains, multi-sample ablations, and any downstream tooling
-    that wants to reconstruct the batch grouping after the fact.
+    assertion so a relying party can see "this is image 2 of 4 from the
+    same workflow execution."
 
-    The returned dict is open-shaped — additional top-level keys
-    (e.g. a future perceptual fingerprint block) can be added by
-    later code without restructuring this builder.
+    The returned dict is open-shaped — additional top-level keys can be
+    added by later code without restructuring this builder.
     """
     return {
         "schema": "com.arcvelvet.generation.v0",
@@ -357,21 +334,22 @@ def _build_generation_assertion(
         "title": title,
         "batch_index": batch_index,
         "batch_size": batch_size,
-        "redacted_prompt": redacted_prompt,
+        # 1.0.0 cutover: workflow_prompt is plaintext; server redacts
+        # for manifest based on include_prompt_text. redacted_prompt is
+        # set by the server, not here.
         "workflow_prompt": prompt or {},
+        "include_prompt_text": bool(include_prompt_text),
+        "promptTextForModeration": prompt_text_for_moderation,
         # extra_pnginfo typically has a "workflow" key holding the
         # editor UI graph (positions, widget values, group annotations).
         # Separate from the executable PROMPT graph; both are useful.
-        # extra_pnginfo is NOT redacted — the editor-UI graph is
-        # what creators see in their own ComfyUI; passing it through
-        # verbatim matches SaveImage behavior and the redacted
-        # workflow_prompt above is the authoritative provenance copy.
+        # extra_pnginfo passes through verbatim — matches SaveImage
+        # behavior and is independent of the workflow_prompt
+        # redaction-for-manifest decision the server makes.
         "extra_pnginfo": extra_pnginfo or {},
         # Reserved slot for future per-image perceptual fingerprint.
         # ARC-API-3-0 addendum: confirmed the assertion path can carry
         # one more optional namespaced block without core-flow change.
-        # Current build leaves it absent; future code adds it here as
-        # "fingerprint": { "algorithm": "...", "value": "..." }.
     }
 
 
@@ -813,17 +791,27 @@ class ARCSave:
         comfyui_version = _detect_comfyui_version()
         batch_size = len(images)
 
-        # Redaction decision is made ONCE per workflow execution and
-        # applied to all images in the batch. Same toggle setting,
-        # same prompt graph, same redaction outcome — relying
-        # parties comparing two signed files from the same batch
-        # should see identical workflow_prompt fields.
-        if include_prompt_text:
-            workflow_prompt = prompt
-        else:
-            patterns = _load_text_encoder_patterns()
-            workflow_prompt = _redact_prompt_text(prompt, patterns)
-        redacted_prompt_flag = not include_prompt_text
+        # 1.0.0 cutover (MINOR-SAFETY-1 Sprint 2C): the node no longer
+        # redacts workflow_prompt locally. The server is the manifest-
+        # redaction authority and walks workflow_prompt with the same
+        # pattern set we use here for extraction.
+        #
+        # The node's responsibilities are now:
+        #   - send workflow_prompt PLAINTEXT (the server hashes it for
+        #     the manifest when include_prompt_text=false)
+        #   - extract the moderation corpus and send it as
+        #     promptTextForModeration (the server scans + discards on
+        #     pass, preserves in a sealed escalation collection on a
+        #     sexual/minors hit)
+        #   - forward include_prompt_text so the server knows the
+        #     creator's manifest-redaction opt-in choice
+        #
+        # The extraction is deterministic per workflow execution and
+        # identical across the batch — every image's assertion carries
+        # the same workflow_prompt + promptTextForModeration so relying
+        # parties comparing two signed files from the same batch see
+        # identical provenance fields.
+        prompt_text_for_moderation = _extract_prompt_text_for_moderation(prompt)
 
         # Per-image loop. Each image's sign is INDEPENDENT — a failure
         # on image 3 raises immediately and the workflow halts; images
@@ -845,14 +833,15 @@ class ARCSave:
             png_bytes = _encode_image_to_png_bytes(image_tensor)
 
             generation_assertion = _build_generation_assertion(
-                prompt=workflow_prompt,
+                prompt=prompt,
                 extra_pnginfo=extra_pnginfo,
                 unique_id=unique_id,
                 title=title,
                 comfyui_version=comfyui_version,
                 batch_index=batch_index,
                 batch_size=batch_size,
-                redacted_prompt=redacted_prompt_flag,
+                include_prompt_text=bool(include_prompt_text),
+                prompt_text_for_moderation=prompt_text_for_moderation,
             )
 
             ingest_result = _post_to_arc_ingest_with_retry(

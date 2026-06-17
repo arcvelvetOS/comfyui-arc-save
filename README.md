@@ -2,7 +2,7 @@
 
 Sign-on-arrival save node for ArcVelvetOS. Replaces ComfyUI's `SaveImage` — encodes the image, POSTs the bytes to the ArcVelvet ingest API, writes the C2PA-signed copy returned by the server to your output directory.
 
-**Status: V0 / Day 1 build. Not yet published. Single-image, no retry, no prompt redaction.**
+**Status: v1.0.0 — server-side prompt moderation + manifest redaction. Pre-Comfy-Registry publish; local install only.**
 
 ## Why this node
 
@@ -78,19 +78,21 @@ Sends a 64×64 random-noise PNG against the live `arcIngest`, asserts the receip
 
 Before any creator depends on this build, run a real workflow (SD1.5 KSampler → VAE Decode → ARC Save) end-to-end through a local ComfyUI install. Verify the signed PNG opens correctly in [Adobe Content Credentials inspector](https://contentauthenticity.adobe.com/inspect) and shows the ArcVelvet platform claim + `com.arcvelvet.generation` assertion. (The inspector will note an unknown CA until the SSL.com cert cutover; see "Cert status" below.)
 
-## What this V0 includes
+## What this includes
 
 - Per-image encode + POST + signed-bytes write across the full batch
 - Single 2-second retry on transient errors (HTTP 503, Timeout, ConnectionError); all other non-200s raise immediately
-- **Prompt redaction by default**: the `include_prompt_text` widget defaults OFF. With it off, text inputs in CLIPTextEncode-style nodes are SHA-256-hashed in the signed assertion (workflow structure preserved; you can reveal the plaintext later and anyone can verify by re-hashing). Flip the widget ON to send the prompt verbatim.
-- **Fail-closed catch-all**: any node whose `class_type` contains the substring `textencode` (case-insensitive) gets redacted — new/unknown encoder variants stay safe by default rather than leaking plaintext.
-- **Configurable pattern list**: extend the catch-all with `text_encoder_patterns` in `arc_config.json` to cover bespoke encoders whose names don't contain `TextEncode` (e.g. T5Encoder, PromptInput). You can only ADD; the catch-all is locked.
+- **Prompt moderation + privacy (v1.0.0, MINOR-SAFETY-1 Sprint 2C)**:
+  - Prompts are scanned **in-flight by the ArcVelvet server** for minor-safety violations and **discarded on pass**. The plaintext prompt corpus never persists on the server — it lives only in the in-flight scan, then goes out of scope.
+  - **Plaintext prompts never enter the public C2PA manifest unless you opt in.** The `include_prompt_text` widget defaults OFF. With it off, the server walks `workflow_prompt` and replaces text-encoder text values with `[REDACTED:sha256:<hex>]` envelopes before signing — the manifest carries the workflow structure (model, sampler, seed, connectivity) but blinds the prompt text. Flip the widget ON to send the prompt verbatim into your signed manifest.
+  - **Server is the redaction authority.** Earlier versions (pre-1.0.0) hashed prompt text on the node side. As of 1.0.0 the node sends `workflow_prompt` plaintext and a separate `promptTextForModeration` field; the server is responsible for the manifest redaction step and is the single source of truth for what becomes a hash. This avoids drift between client-version walks and what the server expects to extract.
+  - **Refusal on a sexual/minors hit**: the server returns HTTP 451 `PROMPT_FLAGGED` and the node raises a clear error. The flagged prompt is preserved in a sealed, client-inaccessible collection for the ArcVelvet operator to handle (NCMEC handoff pipeline). For any non-pass moderation outcome (`MODERATION_UNAVAILABLE` on timeout / OpenAI errors), the node raises with the server's message.
 - `arc_config.json` + `ARC_API_KEY` env var key loading
 - Fail-loudly on any terminal error (no silent unsigned fallback)
 - Sidecar `.arc.json` per signed image with `vaultItemId` / `verifyUrl` / `contentHash`
-- Open-shape generation assertion (`batch_index` / `batch_size` / `redacted_prompt` baked in; additive fingerprint slot reserved)
+- Open-shape generation assertion (`batch_index` / `batch_size` baked in; the `redacted_prompt` flag is now set by the server based on `include_prompt_text`; additive fingerprint slot reserved)
 
-## What's NOT yet in V0
+## What's NOT yet shipped
 
 - ComfyUI Manager / Comfy Registry packaging (the install story is currently "symlink the directory into custom_nodes/"; one-line install via Manager lands with the packaging piece)
 
