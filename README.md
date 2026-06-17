@@ -38,7 +38,7 @@ Or set the `ARC_API_KEY` environment variable.
 
 - The `.gitignore` in this repo prevents accidental commits.
 - **Humans need to manually avoid**: screenshots of the file, ZIP-then-share of the custom_nodes directory, screen-shares with the file open, "send me your config" support requests.
-- If a key is ever exposed: revoke it by setting `revokedAt` on its api_keys doc (see arcvelvet's `api_keys` collection), then re-issue.
+- **If your key is ever exposed** (committed by mistake, posted in a chat, shown in a screen-share, included in a support bundle): contact ArcVelvet immediately at **support@arcvelvet.com** to have the key revoked and a fresh one issued. The faster you report, the smaller the window in which the leaked key can be used.
 
 ### 3. Install into ComfyUI
 
