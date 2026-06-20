@@ -1,8 +1,22 @@
 # ComfyUI ARC Save
 
-Sign-on-arrival save node for ArcVelvetOS. Replaces ComfyUI's `SaveImage` — encodes the image, POSTs the bytes to the ArcVelvet ingest API, writes the C2PA-signed copy returned by the server to your output directory.
+Sign-on-arrival save nodes for ArcVelvetOS. Two nodes ship in this package:
 
-**Status: v1.0.3 — server-side prompt moderation + manifest redaction. Install by cloning into your ComfyUI `custom_nodes/` directory; one-line install via ComfyUI Manager is on the way.**
+- **ARC Save (sign on arrival)** — image-side, stable. Replaces ComfyUI's `SaveImage`; encodes the image, POSTs the bytes to the ArcVelvet ingest API, writes the C2PA-signed copy to your output directory.
+- **ARC Save Audio (sign on arrival)** — audio-side, **alpha**. Encodes a ComfyUI `AUDIO` clip to 16-bit PCM WAV, POSTs to the same ingest API, writes the C2PA-signed WAV + sidecar receipt. Same wire contract as the image node; same prompt-moderation gate; same fail-loudly posture.
+
+**Status: v1.1.0 — adds the audio node alongside the existing stable image node. Install by cloning into your ComfyUI `custom_nodes/` directory; one-line install via ComfyUI Manager is on the way.**
+
+### ⚠️ ARC Save Audio — alpha framing (read before using on real audio)
+
+Signing a WAV file attests **the creation event** (when, by whom, against which workflow), not the authenticity of the voice itself. Specifically:
+
+- The signature does NOT certify that the audio is the real voice of any speaker
+- The signature does NOT certify that the audio is not a deepfake or voice clone of a real person
+- The signature does NOT certify that the audio contents are factually true, lawful, or consented to
+- Prompt moderation covers the text input that drove the audio generation; it does NOT yet cover the audio content itself (transcript scanning, generated lyrics, voice-clone detection, audio-borne policy violations are not in the gate). Audio-content moderation is held for a separate later decision.
+
+Implication: the audio node is appropriate for personal experimentation and alpha testing. It is NOT cleared for a public audio launch — please don't widely distribute signed audio files claiming they are "verified" in a way that implies more than what the manifest actually attests.
 
 ## Why this node
 
@@ -48,15 +62,20 @@ ln -s "$(pwd)" "<path-to-ComfyUI>/custom_nodes/comfyui-arc-save"
 cp -r . "<path-to-ComfyUI>/custom_nodes/comfyui-arc-save"
 ```
 
-Restart ComfyUI. The node appears as `ARC Save (sign on arrival)` under the `image/save` category.
+Restart ComfyUI. Two nodes appear:
+
+- `ARC Save (sign on arrival)` under the `image/save` category
+- `ARC Save Audio (sign on arrival)` under the `audio/save` category
 
 ### 4. Use in a workflow
 
-Replace any `SaveImage` node with `ARC Save (sign on arrival)`. The node has the same input shape (`images`, `filename_prefix`) plus a `title` field and an `include_prompt_text` toggle (default OFF — see "Prompt moderation + privacy" below for what the toggle controls).
+**Image:** replace any `SaveImage` node with `ARC Save (sign on arrival)`. Same input shape (`images`, `filename_prefix`) plus a `title` field and an `include_prompt_text` toggle (default OFF — see "Prompt moderation + privacy" below for what the toggle controls).
+
+**Audio:** wire an upstream audio node (TTS, music generator, etc. — anything that emits ComfyUI's `AUDIO` type) into `ARC Save Audio (sign on arrival)`. Input shape: `audio` (AUDIO), `filename_prefix`, `title`, `include_prompt_text`. The `include_prompt_text` toggle controls text-prompt redaction only — the audio bytes themselves are always signed verbatim. Re-read the alpha framing at the top of this README before using on real audio.
 
 On a successful workflow execution, two files land in your output directory:
 
-- `<prefix>_<vaultItemId>.png` — the signed PNG, ready to share
+- `<prefix>_<vaultItemId>.png` (or `.wav` for the audio node) — the signed file, ready to share
 - `<prefix>_<vaultItemId>.arc.json` — sidecar receipt with `vaultItemId`, `verifyUrl`, `contentHash`, `traceId`
 
 Anyone with the verify URL can hit `https://arcvelvet.com/verify?type=vault&owner={uid}&item={vaultItemId}` to see the provenance JSON, and append `&format=file` to download the signed bytes.
