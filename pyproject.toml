@@ -11,7 +11,7 @@
 
 [project]
 name = "comfyui-arc-save"
-version = "1.1.0"
+version = "1.1.1"
 description = "Sign-on-arrival save nodes for ArcVelvetOS: ARC Save (image, stable) and ARC Save Audio (WAV, alpha). POSTs encoded media to the ArcVelvet arcIngest API; the C2PA-signed copy comes back and lands in your output directory. Server-side prompt moderation; plaintext prompts never enter the public manifest unless you opt in. Audio node is alpha — audio-content moderation (transcript scanning, voice-clone detection) not yet covered; see README before public use."
 authors = [
   { name = "ArcVelvet Studios LLC", email = "support@arcvelvet.com" },
